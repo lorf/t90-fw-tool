@@ -10,6 +10,20 @@ Usage:
 The "no lie" patch removes the fake temperature reading compensation
 from the T90 soldering iron firmware by replacing a conditional branch
 (BNE) with a NOP instruction.
+
+Firmware version extraction: the T90 firmware contains a version
+self-check function (Thumb) that loads its own version as a
+single integer (e.g. 114 = v1.1.4) from RAM and compares it against
+a compile-time immediate, e.g.:
+
+    ldrh r0, [r0, #4]     ; version word
+    cmp  r0, #0x72        ; == 114 (v1.1.4)?
+    beq  <ok>
+
+The tool scans the decrypted firmware for this pattern and decodes
+the version from the compare immediate. If the pattern cannot be
+found (unknown firmware), the version falls back to the filename
+(e.g. t90_v1.1.4.atk).
 """
 
 import sys
@@ -81,6 +95,21 @@ def cmd_info(args):
     # Extract SP and Reset vector from decrypted firmware
     sp, reset = struct.unpack_from("<II", payload, 0)
 
+    # Extract the real firmware version from the code (self-check immediate)
+    firmware_version = None
+    version_checks = find_firmware_version(payload)
+    if version_checks:
+        version_ints = sorted({imm for _, imm in version_checks})
+        if len(version_ints) == 1:
+            firmware_version = format_version(version_ints[0])
+        else:
+            print(f"  WARNING: multiple version check matches: "
+                  f"{[format_version(v) for v in version_ints]}", file=sys.stderr)
+            firmware_version = format_version(version_ints[0])
+    else:
+        # Fall back to the version baked into the filename
+        firmware_version = parse_version_from_filename(args.file)
+
     print(f"File: {args.file}")
     print(f"Size: {len(data)} bytes (header: 13 + payload: {len(data) - 13})")
     print()
@@ -93,6 +122,17 @@ def cmd_info(args):
     print(f"  data_len:  {header['data_len']} bytes (chunk size)")
     print(f"  bin_size:  {header['bin_size']} bytes ({header['bin_size']} payload)")
     print(f"  date:      {header['date']}")
+    print()
+    print("=== Firmware Version ===")
+    print(f"  version:   {firmware_version if firmware_version else 'unknown'}")
+    if version_checks:
+        print(f"  source:    code self-check immediates "
+              f"({len(version_checks)} at payload offsets "
+              f"{', '.join(f'0x{off:04X}' for off, _ in version_checks)})")
+    elif firmware_version:
+        print(f"  source:    filename (code self-check pattern not found)")
+    else:
+        print(f"  source:    unsure")
     print()
     print("=== Decrypted Vector Table ===")
     print(f"  Initial SP:    0x{sp:08X}")
@@ -163,6 +203,77 @@ THUMB_CMP_R5_R4 = 0x42AC       # CMP R5, R4
 THUMB_NOP = 0xBF00             # NOP
 THUMB_MOV_R0_R4 = 0x4620       # MOV R0, R4
 THUMB_POP_R4R5R6PC = 0xBD70    # POP {R4, R5, R6, PC}
+
+
+def format_version(value):
+    """Format a packed version integer (e.g. 114) as '1.1.4'."""
+    if 100 <= value <= 999:
+        return f"{value // 100}.{(value % 100) // 10}.{value % 10}"
+    return str(value)
+
+
+def find_firmware_version(payload):
+    """
+    Extract the firmware version from decrypted payload.
+
+    The firmware contains a version self-check (Thumb). It loads its
+    own version as a single integer (e.g. 114 = v1.1.4) from RAM and
+    compares it with a compile-time immediate:
+
+        ldrh Rt, [Rn, #4]     opcode 1000_1 imm5=2 (Rn, #4)
+        cmp  Rt, #imm8        opcode 001_01 Rd=Rt
+        beq  <skip>           opcode 1101 cond=0 (EQ)
+
+    Returns a list of tuples (payload_offset, version_int) for every
+    match of this pattern (typically there is exactly one).
+    """
+    checks = []
+    n = len(payload)
+    code_end = min(n - 4, 0x18000)  # stop before string/locale data
+
+    for i in range(0x800, code_end, 2):
+        hw = struct.unpack_from("<H", payload, i)[0]
+
+        # LDRH Rt, [Rn, #4]  (T1: 1000_1 imm5(5) Rn(3) Rt(3), imm5*2 == 4)
+        if not (0x8800 <= (hw & 0xFF00) <= 0x8F00):
+            continue
+        if ((hw >> 6) & 0x1F) != 2:
+            continue
+        rt = hw & 0x7
+
+        # CMP Rt, #imm8 (T2: 001_01 Rd(3) imm8(8)) within 3 halfwords
+        for gap in range(1, 4):
+            pos = i + gap * 2
+            if pos + 2 > n:
+                break
+            chw = struct.unpack_from("<H", payload, pos)[0]
+            if (chw >> 11) != 0b00101:
+                continue
+            if ((chw >> 8) & 0x7) != rt:
+                continue
+            imm = chw & 0xFF
+
+            # B EQ right after the compare (cond == 0)
+            bpos = pos + 2
+            if bpos + 2 > n:
+                break
+            bhw = struct.unpack_from("<H", payload, bpos)[0]
+            if (bhw >> 12) == 0xD and ((bhw & 0x0F00) >> 8) == 0x0:
+                checks.append((i, imm))
+
+    return checks
+
+
+def parse_version_from_filename(filename):
+    """
+    Fall back: parse the version from the firmware filename,
+    e.g. maximize_t90_v1.1.4.atk -> '1.1.4'. Returns None if not found.
+    """
+    import re
+    match = re.search(r"t90[_s-]*v?(\d+)\.(\d+)\.(\d+)", filename, re.IGNORECASE)
+    if match:
+        return ".".join(match.groups())
+    return None
 
 
 def find_patch_location(payload):

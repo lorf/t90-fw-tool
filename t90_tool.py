@@ -27,6 +27,7 @@ found (unknown firmware), the version falls back to the filename
 """
 
 import sys
+import re
 import struct
 import argparse
 
@@ -175,6 +176,9 @@ def cmd_extract(args):
     # Decrypt the payload
     payload = xor_decrypt(data[13:])
 
+    # Determine firmware version (used when naming the output file)
+    version = determine_firmware_version(payload, args.file)
+
     # Determine output file name
     if args.output:
         output_file = args.output
@@ -184,12 +188,17 @@ def cmd_extract(args):
         else:
             output_file = args.file + ".bin"
 
+    # Add the firmware version to the name if it's not already there
+    output_file = make_versioned_filename(output_file, version)
+
     with open(output_file, "wb") as f:
         f.write(payload)
 
     print(f"Extracted firmware to: {output_file}")
     print(f"  Payload size: {len(payload)} bytes")
     print(f"  Image base: 0x08005000 (ARM Cortex-M4)")
+    if version:
+        print(f"  Firmware version: {version}")
 
     return 0
 
@@ -274,6 +283,56 @@ def parse_version_from_filename(filename):
     if match:
         return ".".join(match.groups())
     return None
+
+
+def determine_firmware_version(payload, input_file):
+    """
+    Determine the firmware version string ('1.1.4') of a firmware image.
+
+    Prefers the version self-check immediates found in the decrypted
+    code; falls back to the version baked into the input file name.
+    Returns None if the version cannot be determined.
+    """
+    version_checks = find_firmware_version(payload)
+    if version_checks:
+        version_ints = sorted({imm for _, imm in version_checks})
+        if len(version_ints) != 1:
+            print(f"  WARNING: multiple version check matches: "
+                  f"{[format_version(v) for v in version_ints]}", file=sys.stderr)
+        return format_version(version_ints[0])
+    return parse_version_from_filename(input_file)
+
+
+def version_in_filename(filename, version):
+    """
+    Check whether a firmware version is already present in a file name.
+
+    Matches dotted forms like '1.1.4' or 'v1.1.4' (optionally preceded by
+    more version text), and also consults the same filename heuristics as
+    parse_version_from_filename. Returns False if version is None.
+    """
+    if not version:
+        return False
+    escaped = re.escape(version)
+    if re.search(rf"(?<![0-9])v?{escaped}(?![0-9])", filename, re.IGNORECASE):
+        return True
+    return parse_version_from_filename(filename) == version
+
+
+def make_versioned_filename(filename, version):
+    """
+    Insert the firmware version into a file name, e.g.
+    't90_no_lie.atk' + '1.1.4' -> 't90_no_lie_v1.1.4.atk'.
+
+    Leaves the name untouched if the version is unknown or is already
+    part of the file name, or if the name was supplied by the user.
+    """
+    if not version or version_in_filename(filename, version):
+        return filename
+    dot = filename.rfind(".")
+    if dot > 0:
+        return f"{filename[:dot]}_v{version}{filename[dot:]}"
+    return f"{filename}_v{version}"
 
 
 def find_patch_location(payload):
@@ -392,6 +451,9 @@ def cmd_patch(args):
     # Decrypt the payload
     payload = xor_decrypt(bytes(data[13:]))
 
+    # Determine firmware version (used when naming the output file)
+    version = determine_firmware_version(payload, args.file)
+
     # Find the patch location
     patch_offset = find_patch_location(payload)
 
@@ -451,12 +513,17 @@ def cmd_patch(args):
     if args.output:
         output_file = args.output
     else:
-        if args.file.endswith("_no_lie.atk"):
-            output_file = args.file
-        elif args.file.endswith(".atk"):
-            output_file = args.file[:-4] + "_no_lie.atk"
+        if args.file.endswith(".atk"):
+            base, ext = args.file[:-4], ".atk"
         else:
-            output_file = args.file + "_no_lie"
+            base, ext = args.file, ""
+        if base.endswith("_no_lie"):
+            base = base[:-len("_no_lie")]
+        # Version goes before the '_no_lie' suffix: t90_v1.1.4_no_lie.atk
+        output_file = make_versioned_filename(base, version) + "_no_lie" + ext
+
+    # Add the firmware version to the name if it's not already there
+    output_file = make_versioned_filename(output_file, version)
 
     with open(output_file, "wb") as f:
         f.write(output)
@@ -464,6 +531,8 @@ def cmd_patch(args):
     print(f"\nPatched firmware written to: {output_file}")
     print(f"  Original size: {len(data)} bytes")
     print(f"  Output size:   {len(output)} bytes")
+    if version:
+        print(f"  Firmware version: {version}")
 
     return 0
 

@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-t90_tool.py - Alientek T90 firmware analysis and patching tool
+t90_fw_tool.py - Alientek T90 firmware analysis and patching tool
 
 Usage:
-    t90_tool.py info <file.atk>          # Print firmware header information
-    t90_tool.py extract <file.atk> [out.bin]  # Strip header, decrypt to .bin
-    t90_tool.py patch <file.atk> [out.atk]    # Apply "no lie" temperature patch
+    t90_fw_tool.py info <file.atk>          # Print firmware header information
+    t90_fw_tool.py extract <file.atk> [out.bin]  # Strip header, decrypt to .bin
+    t90_fw_tool.py patch <file.atk> [out.atk]    # Apply "no lie" temperature patch
 
 The "no lie" patch removes the fake temperature reading compensation
 from the T90 soldering iron firmware by replacing a conditional branch

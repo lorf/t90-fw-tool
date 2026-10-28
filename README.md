@@ -57,7 +57,7 @@ Unlike tools that patch at fixed byte offsets, this script:
 No dependencies required — Python 3 only (standard library).
 
 ```bash
-chmod +x t90_tool.py
+chmod +x t90_fw_tool.py
 ```
 
 ## Usage
@@ -65,7 +65,7 @@ chmod +x t90_tool.py
 ### Info
 
 ```bash
-python3 t90_tool.py info t90.atk
+python3 t90_fw_tool.py info t90.atk
 ```
 
 Output:
@@ -98,7 +98,7 @@ Size: 104461 bytes (header: 13 + payload: 104448)
 ### Extract
 
 ```bash
-python3 t90_tool.py extract t90.atk firmware.bin
+python3 t90_fw_tool.py extract t90.atk firmware.bin
 ```
 
 Output:
@@ -113,7 +113,7 @@ This produces a raw binary file loadable into IDA, Ghidra, or objdump at base ad
 ### Patch
 
 ```bash
-python3 t90_tool.py patch t90.atk t90_no_lie.atk
+python3 t90_fw_tool.py patch t90.atk t90_no_lie.atk
 ```
 
 Output:
@@ -131,7 +131,7 @@ Patched firmware written to: t90_no_lie.atk
 
 Without explicit output:
 ```bash
-python3 t90_tool.py patch t90.atk
+python3 t90_fw_tool.py patch t90.atk
 ```
 This writes `t90_no_lie.atk` (auto-appends `_no_lie` to the filename).
 

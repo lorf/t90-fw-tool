@@ -152,6 +152,6 @@ Tested against:
 ## References
 
 - [atflash](https://github.com/mishka-zz/atflash) — Firmware flashing tool for T90
-- [protocol.md](protocol.md) — Firmware upgrade protocol specification
+- [protocol.md](https://github.com/mishka-zz/atflash/blob/main/protocol.md) — Firmware upgrade protocol specification
 - [t90-rev](https://github.com/truesurge/t90-rev) — Community reverse engineering collection
 - [4PDA Forum](https://4pda.to/forum/index.php?showtopic=1061134) — Community discussion

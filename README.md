@@ -155,3 +155,4 @@ Tested against:
 - [protocol.md](https://github.com/mishka-zz/atflash/blob/main/protocol.md) — Firmware upgrade protocol specification
 - [t90-rev](https://github.com/truesurge/t90-rev) — Community reverse engineering collection
 - [4PDA Forum](https://4pda.to/forum/index.php?showtopic=1061134) — Community discussion
+- [Latest T90 firmware](https://www.openedv.com/ATK-Prod/ATK-T90/) - Latest official T90 firmware

@@ -159,6 +159,22 @@ def cmd_info(args):
     else:
         print(f"  WARNING: Reset vector (0x{reset:08X}) outside expected Flash range")
 
+    print()
+    print("=== No-Lie Patch ===")
+
+    patch_offset = find_patch_location(payload)
+    patched_offset = find_already_patched_location(payload)
+
+    if patch_offset is not None:
+        print(f"  Status:     not patched (BNE at payload offset {patch_offset}, "
+              f"ARM 0x{0x08005000 + patch_offset:08X})")
+    elif patched_offset is not None:
+        print(f"  Status:     already patched (NOP at payload offset {patched_offset}, "
+              f"ARM 0x{0x08005000 + patched_offset:08X})")
+    else:
+        print(f"  Status:     unknown ('lie' function signature not found - "
+              f"unsupported firmware version?)")
+
     return 0
 
 
@@ -333,6 +349,49 @@ def make_versioned_filename(filename, version):
     if dot > 0:
         return f"{filename[:dot]}_v{version}{filename[dot:]}"
     return f"{filename}_v{version}"
+
+
+def find_already_patched_location(payload):
+    """
+    Search for the 'lie' function signature with the BNE already
+    replaced by a NOP, i.e. detect an already-patched firmware.
+
+    Searches for the exact sequence:
+        PUSH {R4, R5, R6, LR}
+        MOV  R4, R0
+        MOV  R5, R1
+        MOV  R6, R2
+        CMP  R5, R4
+        NOP                  <- patched BNE
+        MOV  R0, R4
+        POP  {R4, R5, R6, PC}
+
+    Returns the payload offset of the NOP instruction, or None if
+    no patched function signature was found.
+    """
+    signature = [
+        THUMB_PUSH_R4R5R6LR,    # PUSH {R4, R5, R6, LR}
+        THUMB_MOV_R4_R0,         # MOV R4, R0
+        THUMB_MOV_R5_R1,         # MOV R5, R1
+        THUMB_MOV_R6_R2,         # MOV R6, R2
+        THUMB_CMP_R5_R4,         # CMP R5, R4
+        THUMB_NOP,               # NOP (was BNE)
+        THUMB_MOV_R0_R4,         # MOV R0, R4 (early return body)
+        THUMB_POP_R4R5R6PC,      # POP {R4, R5, R6, PC}
+    ]
+
+    for i in range(len(payload) - 7 * 2):
+        match = True
+        for j, expected in enumerate(signature):
+            hw = struct.unpack_from("<H", payload, i + j * 2)[0]
+            if hw != expected:
+                match = False
+                break
+        if match:
+            # Found the pattern - the NOP is at offset i + 5*2
+            return i + 5 * 2
+
+    return None
 
 
 def find_patch_location(payload):

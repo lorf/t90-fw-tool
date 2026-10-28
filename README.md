@@ -86,6 +86,9 @@ Size: 104461 bytes (header: 13 + payload: 104448)
   Initial SP:    0x20004DB8
   Reset Vector:  0x080052CD
 
+=== No-Lie Patch ===
+  Status:     not patched (BNE at payload offset 33290, ARM 0x0800D20A)
+
 === Validation ===
   File size matches bin_size + header (104461 bytes) - OK
   SP address in RAM range (0x2000xxxx) - OK

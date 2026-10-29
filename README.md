@@ -10,14 +10,16 @@ Patch the firmware in one command:
 python3 t90_fw_tool.py patch t90.atk
 ```
 
-This writes `t90_no_lie.atk` — the patched firmware with fake temperature compensation removed. You can flash it using [atflash](https://github.com/mishka-zz/atflash) or the official Alientek upgrade protocol.
+This writes `t90_v<version>_no_lie.atk` — the patched firmware with fake temperature compensation removed. You can flash it using [atflash](https://github.com/mishka-zz/atflash) or the official Alientek upgrade protocol.
 
 ## Overview
 
 This tool supports three operations on `.atk` firmware files:
-- **info**: Display firmware header and vector table information
+- **info**: Display firmware header, vector table, and extracted firmware version
 - **extract**: Strip the header and decrypt the firmware payload to a raw `.bin` file
 - **patch**: Apply the "no lie" temperature patch to remove fake temperature compensation
+
+> **Note:** The `app_ver` field in the firmware header is always `1.0.01` regardless of the actual version. The real firmware version is extracted from a Thumb self-check pattern in the decrypted payload, and falls back to the filename if the pattern is not found.
 
 ### The "No Lie" Patch
 
@@ -72,6 +74,10 @@ Size: 104461 bytes (header: 13 + payload: 104448)
   bin_size:  104448 bytes (104448 payload)
   date:      2026-08-17
 
+=== Firmware Version ===
+  version:   1.1.4
+  source:    code self-check immediates (1 at payload offset 0x0200)
+
 === Decrypted Vector Table ===
   Initial SP:    0x20004DB8
   Reset Vector:  0x080052CD
@@ -88,17 +94,18 @@ Size: 104461 bytes (header: 13 + payload: 104448)
 ### Extract
 
 ```bash
-python3 t90_fw_tool.py extract t90.atk firmware.bin
+python3 t90_fw_tool.py extract t90.atk
 ```
 
 Output:
 ```
-Extracted firmware to: firmware.bin
+Extracted firmware to: t90_v1.1.4.bin
   Payload size: 104448 bytes
   Image base: 0x08005000 (ARM Cortex-M4)
+  Firmware version: 1.1.4
 ```
 
-This produces a raw binary file loadable into IDA, Ghidra, or objdump at base address `0x08005000`.
+This produces a raw binary file named `<basename>_v<version>.bin` (e.g. `t90_v1.1.4.bin`), loadable into IDA, Ghidra, or objdump at base address `0x08005000`.
 
 ### Patch
 
@@ -114,16 +121,17 @@ Current instruction at 0x0800D20A: 0xD101
   New instruction: 0xBF00 (NOP)
   This removes the 'lie' temperature compensation
 
-Patched firmware written to: t90_no_lie.atk
+Patched firmware written to: t90_v1.1.4_no_lie.atk
   Original size: 104461 bytes
   Output size:   104461 bytes
+  Firmware version: 1.1.4
 ```
 
 Without explicit output:
 ```bash
 python3 t90_fw_tool.py patch t90.atk
 ```
-This writes `t90_no_lie.atk` (auto-appends `_no_lie` to the filename).
+This writes `t90_v1.1.4_no_lie.atk` (auto-inserts the firmware version and `_no_lie` suffix).
 
 ## References
 

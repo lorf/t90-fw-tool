@@ -1,4 +1,4 @@
-# T90 Firmware Tool
+# Alientek T90 (T90A/T90B/T90C) Firmware Tool
 
 Python tool for analyzing and patching Alientek T90 family soldering iron firmware (`.atk` files).
 

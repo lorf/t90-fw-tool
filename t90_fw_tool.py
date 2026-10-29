@@ -162,8 +162,8 @@ def cmd_info(args):
     print()
     print("=== No-Lie Patch ===")
 
-    patch_offset = find_patch_location(payload)
-    patched_offset = find_already_patched_location(payload)
+    patch_offset = find_function_location(payload, instruction=None)
+    patched_offset = find_function_location(payload, instruction=THUMB_NOP)
 
     if patch_offset is not None:
         print(f"  Status:     not patched (BNE at payload offset {patch_offset}, "
@@ -351,23 +351,27 @@ def make_versioned_filename(filename, version):
     return f"{filename}_v{version}"
 
 
-def find_already_patched_location(payload):
+def find_function_location(payload, instruction=None):
     """
-    Search for the 'lie' function signature with the BNE already
-    replaced by a NOP, i.e. detect an already-patched firmware.
+    Search for the 'lie' function signature in decrypted firmware.
 
-    Searches for the exact sequence:
+    Searches for the 7-instruction sequence:
         PUSH {R4, R5, R6, LR}
         MOV  R4, R0
         MOV  R5, R1
         MOV  R6, R2
         CMP  R5, R4
-        NOP                  <- patched BNE
+        <instruction>     <- BNE (unpatched) or NOP (already patched)
         MOV  R0, R4
         POP  {R4, R5, R6, PC}
 
-    Returns the payload offset of the NOP instruction, or None if
-    no patched function signature was found.
+    Args:
+        payload: The decrypted firmware bytes.
+        instruction: What to expect at the 6th slot.
+            - None:  match BNE with offset 0x01 (unpatched firmware)
+            - THUMB_NOP: match NOP (already-patched firmware)
+
+    Returns the payload offset of the 6th instruction, or None if not found.
     """
     signature = [
         THUMB_PUSH_R4R5R6LR,    # PUSH {R4, R5, R6, LR}
@@ -375,7 +379,7 @@ def find_already_patched_location(payload):
         THUMB_MOV_R5_R1,         # MOV R5, R1
         THUMB_MOV_R6_R2,         # MOV R6, R2
         THUMB_CMP_R5_R4,         # CMP R5, R4
-        THUMB_NOP,               # NOP (was BNE)
+        instruction,             # BNE (None) or NOP (already patched)
         THUMB_MOV_R0_R4,         # MOV R0, R4 (early return body)
         THUMB_POP_R4R5R6PC,      # POP {R4, R5, R6, PC}
     ]
@@ -384,70 +388,24 @@ def find_already_patched_location(payload):
         match = True
         for j, expected in enumerate(signature):
             hw = struct.unpack_from("<H", payload, i + j * 2)[0]
-            if hw != expected:
-                match = False
-                break
-        if match:
-            # Found the pattern - the NOP is at offset i + 5*2
-            return i + 5 * 2
-
-    return None
-
-
-def find_patch_location(payload):
-    """
-    Search for the 'lie' patch location in decrypted firmware.
-
-    Searches for the function signature:
-        PUSH {R4, R5, R6, LR}
-        MOV  R4, R0
-        MOV  R5, R1
-        MOV  R6, R2
-        CMP  R5, R4
-        BNE  <offset>
-        MOV  R0, R4
-        POP  {R4, R5, R6, PC}
-
-    Returns the payload offset of the BNE instruction, or None if not found.
-    """
-    # Build the signature pattern
-    # We search for a 7-instruction sequence
-    signature = [
-        THUMB_PUSH_R4R5R6LR,    # PUSH {R4, R5, R6, LR}
-        THUMB_MOV_R4_R0,         # MOV R4, R0
-        THUMB_MOV_R5_R1,         # MOV R5, R1
-        THUMB_MOV_R6_R2,         # MOV R6, R2
-        THUMB_CMP_R5_R4,         # CMP R5, R4
-        None,                    # BNE (we check the pattern)
-        THUMB_MOV_R0_R4,         # MOV R0, R4 (early return body)
-        THUMB_POP_R4R5R6PC,      # POP {R4, R5, R6, PC}
-    ]
-
-    for i in range(len(payload) - 7 * 2):
-        match = True
-        for j, expected in enumerate(signature):
-            hw = struct.unpack_from("<H", payload, i + j * 2)[0]
-            if expected is not None and hw != expected:
-                match = False
-                break
-            if expected is None:
-                # This should be BNE (D1xx)
-                if (hw & 0xF000) != 0xD000:  # B<cond>
+            if expected is not None:
+                if hw != expected:
                     match = False
                     break
-                # Check it's BNE specifically (condition 0x01)
+            else:
+                # BNE check: condition field == 0x01 (NE), opcode D000-DF00
+                if (hw & 0xF000) != 0xD000:
+                    match = False
+                    break
                 if (hw & 0x0F00) != 0x0100:  # NE condition
                     match = False
                     break
-                # Check offset is positive and small (likely +6 = skip early return)
-                imm = hw & 0xFF
-                if imm != 0x01:  # BNE #2 -> offset is (imm * 2 + 4) = 6
+                if (hw & 0xFF) != 0x01:  # imm == 0x01 (BNE #2 -> skip +6)
                     match = False
                     break
 
         if match:
-            # Found the pattern - the BNE is at offset i + 5*2
-            return i + 5 * 2
+            return i + 5 * 2  # offset of the BNE/NOP instruction
 
     return None
 
@@ -470,7 +428,7 @@ def cmd_patch(args):
     version = determine_firmware_version(payload, args.file)
 
     # Find the patch location
-    patch_offset = find_patch_location(payload)
+    patch_offset = find_function_location(payload, instruction=None)
 
     if patch_offset is None:
         print("Error: Could not find the 'lie' patch location in firmware.", file=sys.stderr)

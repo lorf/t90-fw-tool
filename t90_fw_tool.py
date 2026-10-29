@@ -452,50 +452,6 @@ def find_patch_location(payload):
     return None
 
 
-def verify_patch_context(payload, patch_offset):
-    """
-    Verify the context around the patch location to ensure this is the right
-    code block to patch.
-
-    The expected function layout (from PUSH to POP) is:
-        PUSH {R4, R5, R6, LR}   (patch_offset - 10)
-        MOV  R4, R0             (patch_offset - 8)
-        MOV  R5, R1             (patch_offset - 6)
-        MOV  R6, R2             (patch_offset - 4)
-        CMP  R5, R4             (patch_offset - 2)
-        BNE  <offset>           (patch_offset)   <- PATCH TARGET
-        MOV  R0, R4             (patch_offset + 2)  <- early return body
-        POP  {R4, R5, R6, PC}   (patch_offset + 4)
-
-    Returns True if context is valid, False otherwise.
-    """
-    # Check we have enough context (need 5 halfwords before and 2 after)
-    if patch_offset < 10 or patch_offset + 6 > len(payload):
-        return False
-
-    # Verify the PUSH {R4, R5, R6, LR} at patch_offset - 10
-    hw = struct.unpack_from("<H", payload, patch_offset - 10)[0]
-    if hw != THUMB_PUSH_R4R5R6LR:
-        return False
-
-    # Verify CMP R5, R4 just before the BNE
-    hw = struct.unpack_from("<H", payload, patch_offset - 2)[0]
-    if hw != THUMB_CMP_R5_R4:
-        return False
-
-    # Verify the early return body after BNE: MOV R0, R4
-    hw = struct.unpack_from("<H", payload, patch_offset + 2)[0]
-    if hw != THUMB_MOV_R0_R4:
-        return False
-
-    # Verify POP {R4, R5, R6, PC} after MOV
-    hw = struct.unpack_from("<H", payload, patch_offset + 4)[0]
-    if hw != THUMB_POP_R4R5R6PC:
-        return False
-
-    return True
-
-
 def cmd_patch(args):
     """Apply the 'no lie' patch to a T90 firmware file."""
     with open(args.file, "rb") as f:
@@ -522,15 +478,8 @@ def cmd_patch(args):
         print("  This may be a different firmware version or already patched.", file=sys.stderr)
         return 1
 
-    # Verify context
-    if not verify_patch_context(payload, patch_offset):
-        print(f"Warning: Surrounding code context does not fully match expected pattern.",
-              file=sys.stderr)
-        print(f"  Patch location found at offset {patch_offset} (ARM 0x{0x08005000 + patch_offset:08X})",
-              file=sys.stderr)
-    else:
-        print(f"Patch location verified at payload offset {patch_offset} "
-              f"(ARM 0x{0x08005000 + patch_offset:08X})")
+    print(f"Patch location found at payload offset {patch_offset} "
+        f"(ARM 0x{0x08005000 + patch_offset:08X})")
 
     # Read the current instruction (should be BNE)
     current_hw = struct.unpack_from("<H", payload, patch_offset)[0]

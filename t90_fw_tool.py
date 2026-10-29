@@ -166,10 +166,10 @@ def cmd_info(args):
     patched_offset = find_function_location(payload, instruction=THUMB_NOP)
 
     if patch_offset is not None:
-        print(f"  Status:     not patched (BNE at payload offset {patch_offset}, "
+        print(f"  Status:     not patched (BNE at payload offset 0x{patch_offset:04X}, "
               f"ARM 0x{0x08005000 + patch_offset:08X})")
     elif patched_offset is not None:
-        print(f"  Status:     already patched (NOP at payload offset {patched_offset}, "
+        print(f"  Status:     already patched (NOP at payload offset 0x{patched_offset:04X}, "
               f"ARM 0x{0x08005000 + patched_offset:08X})")
     else:
         print(f"  Status:     unknown ('lie' function signature not found - "
@@ -436,7 +436,7 @@ def cmd_patch(args):
         print("  This may be a different firmware version or already patched.", file=sys.stderr)
         return 1
 
-    print(f"Patch location found at payload offset {patch_offset} "
+    print(f"Patch location found at payload offset 0x{patch_offset:04X} "
         f"(ARM 0x{0x08005000 + patch_offset:08X})")
 
     # Read the current instruction (should be BNE)

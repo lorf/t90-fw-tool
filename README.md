@@ -2,32 +2,22 @@
 
 Python tool for analyzing and patching Alientek T90 family soldering iron firmware (`.atk` files).
 
+## TL;DR
+
+Patch the firmware in one command:
+
+```bash
+python3 t90_fw_tool.py patch t90.atk
+```
+
+This writes `t90_no_lie.atk` — the patched firmware with fake temperature compensation removed. You can flash it using [atflash](https://github.com/mishka-zz/atflash) or the official Alientek upgrade protocol.
+
 ## Overview
 
 This tool supports three operations on `.atk` firmware files:
 - **info**: Display firmware header and vector table information
 - **extract**: Strip the header and decrypt the firmware payload to a raw `.bin` file
 - **patch**: Apply the "no lie" temperature patch to remove fake temperature compensation
-
-### Firmware Format
-
-The `.atk` container format consists of:
-
-| Offset | Size | Field       | Description |
-|--------|------|-------------|-------------|
-| 0x0000 | 2    | `dev_type`  | Device model (0x0208 for T90) |
-| 0x0002 | 1    | `hw_rev`    | Hardware revision |
-| 0x0003 | 1    | `app_ver`   | Application version |
-| 0x0004 | 1    | `file_type` | Image type (0xA0=App, 0xA1=Logo, 0xB0=Bootloader) |
-| 0x0005 | 1    | `data_len`  | Flash chunk size (typically 32) |
-| 0x0006 | 4    | `bin_size`  | Payload size in bytes |
-| 0x000A | 3    | `date`      | Build date (year-2000, month, day) |
-| 0x000D | N    | `payload`   | XOR-0xFF obfuscated firmware |
-
-The firmware payload is XOR'd with `0xFF`. After decryption, the first 8 bytes form the ARM Cortex-M vector table (initial SP and Reset vector).
-
-- **MCU**: Nationstech N32L40x (ARM Cortex-M4F)
-- **Image base**: `0x08005000` (bootloader occupies `0x08000000`-`0x08004FFF`, not included in updates)
 
 ### The "No Lie" Patch
 
@@ -135,20 +125,6 @@ python3 t90_fw_tool.py patch t90.atk
 ```
 This writes `t90_no_lie.atk` (auto-appends `_no_lie` to the filename).
 
-## Safety Features
-
-- **Pattern matching**: Finds the correct code location dynamically, not hardcoded offsets
-- **Context verification**: Validates surrounding instructions before patching
-- **Already-patched detection**: Refuses to patch firmware that's already been modified
-- **Header validation**: Rejects files with unexpected `dev_type` values
-
-## Verified Compatibility
-
-Tested against:
-- `t90_v1.1.4.atk` → matches reference `t90_v1.1.4_no_lie.atk` byte-for-byte
-- `t90_v1.1.5.atk` → matches reference `t90_v1.1.5_no_lie.atk` byte-for-byte
-- `t90.atk` → successfully patched (unknown version, date 2026-08-17)
-
 ## References
 
 - [atflash](https://github.com/mishka-zz/atflash) — Firmware flashing tool for T90
@@ -160,4 +136,6 @@ Tested against:
 ## Acknowledgments
 
 - [4asik](https://4pda.to/forum/index.php?showtopic=1061134&view=findpost&p=142761677) (4pda.to forums) — original author of the "no lie" patch
-- [atflash](https://github.com/mishka-zz/atflash) — reverse-engineered firmware header format and flash protocol, command line flash tool
+- [mishka-zz](https://github.com/mishka-zz) — reverse-engineered firmware header format and flash protocol (atflash), command line flash tool author
+
+This tool was created with AI assistance.

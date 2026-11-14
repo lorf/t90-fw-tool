@@ -471,6 +471,17 @@ def cmd_patch(args):
     # Determine firmware version (used when naming the output file)
     version = determine_firmware_version(payload, args.file)
 
+    # Patches already present in the input stay in the output, so the
+    # output name must reflect them too - not just the requested ones.
+    already = set()
+    if find_function_location(payload, instruction=THUMB_NOP) is not None:
+        already.add("nolie")
+    if find_logo_anim_patch(payload) is not None:
+        already.add("nologo")
+    if find_lcd_waits(payload, patched=True) is not None:
+        already.add("fastlcd")
+    effective = selected | already
+
     new_payload = bytearray(payload)
 
     if do_nolie:
@@ -568,7 +579,7 @@ def cmd_patch(args):
 
     suffix = ""
     for name in ("nolie", "nologo", "fastlcd"):
-        if name in selected:
+        if name in effective:
             suffix += "_" + name
     if not suffix:
         print("Error: no patches selected.", file=sys.stderr)

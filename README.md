@@ -195,6 +195,8 @@ python3 t90_fw_tool.py patch t90.atk
 ```
 This writes `t90_v1.1.4_nolie_nologo_fastlcd.atk` (auto-inserts the firmware version and the `_nolie_nologo_fastlcd` suffix).
 
+The output name always reflects every patch present in the written file — including patches the input already contained. Patching a partially patched file therefore never loses track of earlier patches in the name, and old suffixes are never stacked.
+
 To apply only a subset (comma-separated in one flag; the default run equals `--only nolie,nologo,fastlcd`):
 
 ```bash

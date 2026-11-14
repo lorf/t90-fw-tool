@@ -10,20 +10,20 @@ Patch the firmware in one command:
 python3 t90_fw_tool.py patch t90.atk
 ```
 
-This writes `t90_v<version>_no_lie.atk` — the patched firmware with fake temperature compensation removed. You can flash it using [atflash](https://github.com/mishka-zz/atflash) or the official Alientek upgrade protocol.
+This writes `t90_v<version>_nolie_nologo.atk` — the patched firmware with fake temperature compensation removed and the boot logo animation skipped. You can flash it using [atflash](https://github.com/mishka-zz/atflash) or the official Alientek upgrade protocol.
 
 ## Overview
 
 This tool supports three operations on `.atk` firmware files:
-- **info**: Display firmware header, vector table, and extracted firmware version
+- **info**: Display firmware header, vector table, extracted firmware version, and patch status
 - **extract**: Strip the header and decrypt the firmware payload to a raw `.bin` file
-- **patch**: Apply the "no lie" temperature patch to remove fake temperature compensation
+- **patch**: Apply the "nolie" temperature patch and the "nologo" boot logo skip
 
 > **Note:** The `app_ver` field in the firmware header is always `1.0.01` regardless of the actual version. The real firmware version is extracted from a Thumb self-check pattern in the decrypted payload, and falls back to the filename if the pattern is not found.
 
-### The "No Lie" Patch
+### The "Nolie" Patch
 
-The T90 firmware contains temperature compensation code that can display inaccurate temperature readings. The "no lie" patch removes this behavior by:
+The T90 firmware contains temperature compensation code that can display inaccurate temperature readings. The "nolie" patch removes this behavior by:
 
 1. **Finding** the function with the signature pattern:
    ```asm
@@ -43,6 +43,27 @@ Unlike tools that patch at fixed byte offsets, this script:
 - Searches for the function pattern across the firmware
 - Verifies surrounding instructions match expected context
 - Works across different firmware versions
+
+### The "Nologo" Patch
+
+At boot the firmware draws the 160x40 logo in a sliding-animation loop (~21 fullscreen redraws), which dominates startup time. The "nologo" patch skips the loop while keeping the boot state machine intact:
+
+1. **Finding** the animation init with surrounding-code verification:
+   ```asm
+   CBNZ r0, <skip>
+   MOVS r0, #0
+   LDR  r1, [PC, #imm]  ; boot flag
+   STRB r0, [r1]
+   MVN.W r4, #0x26      ; loop counter = -39 (patched site)
+   B    <loop>
+   CMP  r4, #0
+   BLT  <redraw>
+   MOVS r4, #0
+   ```
+
+2. **Replacing** `mvn.w r4, #0x26` with `movs r4, #2; nop`, so the loop-exit condition (`r4 >= 2`) is already true and zero draws run. Every raw byte-match is validated against the neighbours above, so a stray byte sequence inside bitmap/data cannot be mispatched.
+
+`patch` applies both patches in one run.
 
 ## Installation
 
@@ -82,13 +103,22 @@ Size: 104461 bytes (header: 13 + payload: 104448)
   Initial SP:    0x20004DB8
   Reset Vector:  0x080052CD
 
-=== No-Lie Patch ===
-  Status:     not patched (BNE at payload offset 33290, ARM 0x0800D20A)
-
 === Validation ===
   File size matches bin_size + header (104461 bytes) - OK
   SP address in RAM range (0x2000xxxx) - OK
   Reset vector in Flash range - OK
+
+=== Patches ===
+  nolie:    not patched (BNE at payload offset 0x820A, ARM 0x0800D20A)
+  nologo:   not patched (mvn.w r4, #0x26 at payload offset 0x0FB84, ARM 0x08014B84)
+      OK   CBNZ r0: 0xBB30
+      OK   MOVS r0, #0: 0x2000
+      OK   LDR Rt, [PC, #imm] (r1): 0x493B
+      OK   STRB r0, [r1]: 0x7008
+      OK   B <loop>: 0xE015
+      OK   CMP r4, #0: 0x2C00
+      OK   BLT <redraw>: 0xDB00
+      OK   MOVS r4, #0: 0x2400
 ```
 
 ### Extract
@@ -110,18 +140,28 @@ This produces a raw binary file named `<basename>_v<version>.bin` (e.g. `t90_v1.
 ### Patch
 
 ```bash
-python3 t90_fw_tool.py patch t90.atk t90_no_lie.atk
+python3 t90_fw_tool.py patch t90.atk t90_nolie_nologo.atk
 ```
 
 Output:
 ```
-Patch location verified at payload offset 33290 (ARM 0x0800D20A)
+Patch location found at payload offset 0x820A (ARM 0x0800D20A)
 Current instruction at 0x0800D20A: 0xD101
   BNE #+6 -> jumps to 0x0800D210 (the 'lie' code)
   New instruction: 0xBF00 (NOP)
   This removes the 'lie' temperature compensation
+Logo animation init at payload offset 0x0FB84 (ARM 0x08014B84): mvn.w r4, #0x26 (-39)
+    OK   CBNZ r0: 0xBB30
+    OK   MOVS r0, #0: 0x2000
+    OK   LDR Rt, [PC, #imm] (r1): 0x493B
+    OK   STRB r0, [r1]: 0x7008
+    OK   B <loop>: 0xE015
+    OK   CMP r4, #0: 0x2C00
+    OK   BLT <redraw>: 0xDB00
+    OK   MOVS r4, #0: 0x2400
+  Patched to: movs r4, #2; nop (loop runs zero times, logo skipped)
 
-Patched firmware written to: t90_v1.1.4_no_lie.atk
+Patched firmware written to: t90_v1.1.4_nolie_nologo.atk
   Original size: 104461 bytes
   Output size:   104461 bytes
   Firmware version: 1.1.4
@@ -131,7 +171,14 @@ Without explicit output:
 ```bash
 python3 t90_fw_tool.py patch t90.atk
 ```
-This writes `t90_v1.1.4_no_lie.atk` (auto-inserts the firmware version and `_no_lie` suffix).
+This writes `t90_v1.1.4_nolie_nologo.atk` (auto-inserts the firmware version and `_nolie_nologo` suffix).
+
+To apply only one patch:
+
+```bash
+python3 t90_fw_tool.py patch --only nolie t90.atk    # -> t90_v1.1.4_nolie.atk
+python3 t90_fw_tool.py patch --only nologo t90.atk   # -> t90_v1.1.4_nologo.atk
+```
 
 ## References
 

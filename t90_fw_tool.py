@@ -5,11 +5,16 @@ t90_fw_tool.py - Alientek T90 firmware analysis and patching tool
 Usage:
     t90_fw_tool.py info <file.atk>          # Print firmware header information
     t90_fw_tool.py extract <file.atk> [out.bin]  # Strip header, decrypt to .bin
-    t90_fw_tool.py patch <file.atk> [out.atk]    # Apply "no lie" temperature patch
+    t90_fw_tool.py patch [--only nolie|nologo] <file.atk> [out.atk]
+                                    # Apply patches (default: both)
 
 The "no lie" patch removes the fake temperature reading compensation
 from the T90 soldering iron firmware by replacing a conditional branch
 (BNE) with a NOP instruction.
+
+The "nologo" patch skips the boot logo animation loop (mvn.w r4, #0x26
+-> movs r4, #2; nop), reducing logo show time to zero while keeping
+the boot state machine intact.
 
 Firmware version extraction: the T90 firmware contains a version
 self-check function (Thumb) that loads its own version as a
@@ -160,19 +165,32 @@ def cmd_info(args):
         print(f"  WARNING: Reset vector (0x{reset:08X}) outside expected Flash range")
 
     print()
-    print("=== No-Lie Patch ===")
+    print("=== Patches ===")
 
     patch_offset = find_function_location(payload, instruction=None)
     patched_offset = find_function_location(payload, instruction=THUMB_NOP)
 
     if patch_offset is not None:
-        print(f"  Status:     not patched (BNE at payload offset 0x{patch_offset:04X}, "
+        print(f"  nolie:    not patched (BNE at payload offset 0x{patch_offset:04X}, "
               f"ARM 0x{0x08005000 + patch_offset:08X})")
     elif patched_offset is not None:
-        print(f"  Status:     already patched (NOP at payload offset 0x{patched_offset:04X}, "
+        print(f"  nolie:    already patched (NOP at payload offset 0x{patched_offset:04X}, "
               f"ARM 0x{0x08005000 + patched_offset:08X})")
     else:
-        print(f"  Status:     unknown ('lie' function signature not found - "
+        print(f"  nolie:    unknown ('lie' function signature not found - "
+              f"unsupported firmware version?)")
+
+    anim_off = find_logo_anim(payload)
+    if anim_off is not None:
+        arm = 0x08005000 + anim_off
+        print(f"  nologo:   not patched (mvn.w r4, #0x26 at payload offset 0x{anim_off:05X}, "
+              f"ARM 0x{arm:08X})")
+        for desc, _, actual, ok in verify_logo_anim(payload, anim_off):
+            print(f"      {'OK ' if ok else 'FAIL'}  {desc}: {actual}")
+    elif find_logo_anim_patch(payload) is not None:
+        print(f"  nologo:   already patched (movs r4, #2; nop present, logo skipped)")
+    else:
+        print(f"  nologo:   unknown (logo animation pattern not found - "
               f"unsupported firmware version?)")
 
     return 0
@@ -338,7 +356,7 @@ def version_in_filename(filename, version):
 def make_versioned_filename(filename, version):
     """
     Insert the firmware version into a file name, e.g.
-    't90_no_lie.atk' + '1.1.4' -> 't90_no_lie_v1.1.4.atk'.
+    't90_nolie.atk' + '1.1.4' -> 't90_nolie_v1.1.4.atk'.
 
     Leaves the name untouched if the version is unknown or is already
     part of the file name, or if the name was supplied by the user.
@@ -411,7 +429,10 @@ def find_function_location(payload, instruction=None):
 
 
 def cmd_patch(args):
-    """Apply the 'no lie' patch to a T90 firmware file."""
+    """Apply the selected patches (default: both nolie and nologo)."""
+    do_nolie = args.only in (None, "nolie")
+    do_nologo = args.only in (None, "nologo")
+
     with open(args.file, "rb") as f:
         data = bytearray(f.read())
 
@@ -427,46 +448,74 @@ def cmd_patch(args):
     # Determine firmware version (used when naming the output file)
     version = determine_firmware_version(payload, args.file)
 
-    # Find the patch location
-    patch_offset = find_function_location(payload, instruction=None)
-
-    if patch_offset is None:
-        print("Error: Could not find the 'lie' patch location in firmware.", file=sys.stderr)
-        print("  The function signature pattern was not found.", file=sys.stderr)
-        print("  This may be a different firmware version or already patched.", file=sys.stderr)
-        return 1
-
-    print(f"Patch location found at payload offset 0x{patch_offset:04X} "
-        f"(ARM 0x{0x08005000 + patch_offset:08X})")
-
-    # Read the current instruction (should be BNE)
-    current_hw = struct.unpack_from("<H", payload, patch_offset)[0]
-    arm_addr = 0x08005000 + patch_offset
-
-    print(f"Current instruction at 0x{arm_addr:08X}: 0x{current_hw:04X}")
-
-    # Decode it to show what we're replacing
-    if (current_hw & 0xFF00) == 0xD100 and (current_hw & 0x0F00) == 0x0100:
-        imm = current_hw & 0xFF
-        target_offset = patch_offset + imm * 2 + 4
-        target_addr = 0x08005000 + target_offset
-        print(f"  BNE #{imm*2+4:+d} -> jumps to 0x{target_addr:08X} (the 'lie' code)")
-    else:
-        print(f"  WARNING: Expected BNE, found different instruction", file=sys.stderr)
-        print(f"  Not patching - aborting for safety", file=sys.stderr)
-        return 1
-
-    # Check if already patched (NOP)
-    if current_hw == THUMB_NOP:
-        print("Firmware is already patched (NOP found instead of BNE)", file=sys.stderr)
-        return 1
-
-    # Apply patch: BNE -> NOP
     new_payload = bytearray(payload)
-    struct.pack_into("<H", new_payload, patch_offset, THUMB_NOP)
 
-    print(f"  New instruction: 0x{THUMB_NOP:04X} (NOP)")
-    print(f"  This removes the 'lie' temperature compensation")
+    if do_nolie:
+        # Find the patch location
+        patch_offset = find_function_location(new_payload, instruction=None)
+
+        if patch_offset is None:
+            if find_function_location(new_payload, instruction=THUMB_NOP) is not None:
+                print("Error: firmware is already patched (NOP found instead of BNE).",
+                      file=sys.stderr)
+            else:
+                print("Error: Could not find the 'lie' patch location in firmware.", file=sys.stderr)
+                print("  The function signature pattern was not found.", file=sys.stderr)
+                print("  This may be a different firmware version or already patched.", file=sys.stderr)
+            return 1
+
+        print(f"Patch location found at payload offset 0x{patch_offset:04X} "
+            f"(ARM 0x{0x08005000 + patch_offset:08X})")
+
+        # Read the current instruction (should be BNE)
+        current_hw = struct.unpack_from("<H", new_payload, patch_offset)[0]
+        arm_addr = 0x08005000 + patch_offset
+
+        print(f"Current instruction at 0x{arm_addr:08X}: 0x{current_hw:04X}")
+
+        # Decode it to show what we're replacing
+        if (current_hw & 0xFF00) == 0xD100 and (current_hw & 0x0F00) == 0x0100:
+            imm = current_hw & 0xFF
+            target_offset = patch_offset + imm * 2 + 4
+            target_addr = 0x08005000 + target_offset
+            print(f"  BNE #{imm*2+4:+d} -> jumps to 0x{target_addr:08X} (the 'lie' code)")
+        else:
+            print(f"  WARNING: Expected BNE, found different instruction", file=sys.stderr)
+            print(f"  Not patching - aborting for safety", file=sys.stderr)
+            return 1
+
+        # Check if already patched (NOP)
+        if current_hw == THUMB_NOP:
+            print("Firmware is already patched (NOP found instead of BNE)", file=sys.stderr)
+            return 1
+
+        # Apply patch: BNE -> NOP
+        struct.pack_into("<H", new_payload, patch_offset, THUMB_NOP)
+
+        print(f"  New instruction: 0x{THUMB_NOP:04X} (NOP)")
+        print(f"  This removes the 'lie' temperature compensation")
+
+    if do_nologo:
+        # Apply logo animation skip: mvn.w r4, #0x26 -> movs r4, #2; nop
+        anim_off = find_logo_anim(new_payload)
+        if anim_off is None:
+            if find_logo_anim_patch(new_payload) is not None:
+                print(f"Logo animation already skipped (patch present).")
+            else:
+                print("Error: logo animation pattern not found.", file=sys.stderr)
+                print("  Unsupported firmware version?", file=sys.stderr)
+                return 1
+        else:
+            print(f"Logo animation init at payload offset 0x{anim_off:05X} "
+                  f"(ARM 0x{0x08005000 + anim_off:08X}): mvn.w r4, #0x26 (-39)")
+            for desc, _, actual, ok in verify_logo_anim(new_payload, anim_off):
+                print(f"    {'OK ' if ok else 'FAIL'}  {desc}: {actual}")
+                if not ok:
+                    print(f"  Surrounding code mismatch - not patching for safety",
+                          file=sys.stderr)
+                    return 1
+            new_payload[anim_off:anim_off + 4] = LOGO_ANIM_PATCH
+            print(f"  Patched to: movs r4, #2; nop (loop runs zero times, logo skipped)")
 
     # Re-encrypt the payload
     encrypted_payload = xor_decrypt(bytes(new_payload))
@@ -475,6 +524,12 @@ def cmd_patch(args):
     output = bytearray(data[:13])  # Keep original header
     output.extend(encrypted_payload)
 
+    if do_nolie and do_nologo:
+        suffix = "_nolie_nologo"
+    elif do_nolie:
+        suffix = "_nolie"
+    else:
+        suffix = "_nologo"
     # Determine output file
     if args.output:
         output_file = args.output
@@ -483,10 +538,11 @@ def cmd_patch(args):
             base, ext = args.file[:-4], ".atk"
         else:
             base, ext = args.file, ""
-        if base.endswith("_no_lie"):
-            base = base[:-len("_no_lie")]
-        # Version goes before the '_no_lie' suffix: t90_v1.1.4_no_lie.atk
-        output_file = make_versioned_filename(base, version) + "_no_lie" + ext
+        for old in ("_nolie_nologo", "_nologo", "_nolie"):
+            if base.endswith(old):
+                base = base[:-len(old)]
+        # Version goes before the suffix: t90_v1.1.4_nolie_nologo.atk
+        output_file = make_versioned_filename(base, version) + suffix + ext
 
     # Add the firmware version to the name if it's not already there
     output_file = make_versioned_filename(output_file, version)
@@ -503,6 +559,89 @@ def cmd_patch(args):
     return 0
 
 
+# Boot logo animation: the logo task draws the 160x40 logo in a loop
+# with a sliding Y-offset, starting at r4 = ~0x26 (-39) and stepping +2
+# until r4 >= 2 (~21 fullscreen draws). This dominates boot time.
+# Patching the loop init to r4 = 2 skips all draws (zero logo time)
+# while keeping the state-machine tail intact.
+LOGO_ANIM_ORIG = bytes([0x6F, 0xF0, 0x26, 0x04])  # mvn.w r4, #0x26
+LOGO_ANIM_PATCH = bytes([0x02, 0x24, 0x00, 0xBF])  # movs r4, #2; nop
+
+# Expected Thumb neighbours of the animation init, as (delta, mask, value,
+# description). Register/offset fields that vary across firmware builds
+# (branch targets, literal-pool offsets) are masked out; only the opcode
+# class and fixed registers are checked.
+LOGO_ANIM_SURROUND = [
+    (-8, 0xF907, 0xB900, "CBNZ r0"),
+    (-6, 0xFFFF, 0x2000, "MOVS r0, #0"),
+    (-4, 0xF800, 0x4800, "LDR Rt, [PC, #imm] (r1)"),
+    (-2, 0xFFFF, 0x7008, "STRB r0, [r1]"),
+    (+4, 0xF800, 0xE000, "B <loop>"),
+    (+6, 0xFFFF, 0x2C00, "CMP r4, #0"),
+    (+8, 0xFF00, 0xDB00, "BLT <redraw>"),
+    (+10, 0xFFFF, 0x2400, "MOVS r4, #0"),
+]
+
+# Deltas at which the exact register also matters (LDR Rt must be r1).
+LOGO_ANIM_LDR_RT = 1
+
+
+def verify_logo_anim(payload, idx):
+    """Check the instructions surrounding a logo-anim candidate.
+
+    Returns a list of (description, expected, actual, ok) tuples, or
+    None if the candidate is out of bounds.
+    """
+    n = len(payload)
+    if idx < 8 or idx + 14 > n:
+        return None
+    results = []
+    for delta, mask, value, desc in LOGO_ANIM_SURROUND:
+        hw = struct.unpack_from("<H", payload, idx + delta)[0]
+        if delta == -4:
+            # LDR: opcode class + Rt == r1 must both hold.
+            ok = (hw & 0xF800) == 0x4800 and ((hw >> 8) & 0x7) == LOGO_ANIM_LDR_RT
+            results.append((desc, f"0x4800|Rt=1", f"0x{hw:04X}", ok))
+        else:
+            results.append((desc, f"0x{value:04X}", f"0x{hw:04X}",
+                            (hw & mask) == value))
+    return results
+
+
+def find_logo_anim(payload):
+    """Find payload offset of the logo animation init (mvn.w r4, #0x26).
+
+    Every raw byte-match is validated against its surrounding code; a
+    candidate whose neighbours do not decode as expected is skipped, so
+    a stray 0x6FF02604 inside bitmap/data cannot be mispatched. Returns
+    the offset or None.
+    """
+    raw = bytes(payload)
+    start = 0
+    while True:
+        idx = raw.find(LOGO_ANIM_ORIG, start)
+        if idx < 0:
+            return None
+        results = verify_logo_anim(payload, idx)
+        if results is not None and all(ok for _, _, _, ok in results):
+            return idx
+        start = idx + 1
+
+
+def find_logo_anim_patch(payload):
+    """Find payload offset of an applied logo-skip patch, if surroundings fit."""
+    raw = bytes(payload)
+    start = 0
+    while True:
+        idx = raw.find(LOGO_ANIM_PATCH, start)
+        if idx < 0:
+            return None
+        results = verify_logo_anim(payload, idx)
+        if results is not None and all(ok for _, _, _, ok in results):
+            return idx
+        start = idx + 1
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Alientek T90 firmware analysis and patching tool",
@@ -511,7 +650,7 @@ def main():
 Commands:
     info    Print firmware header and vector table information
     extract Strip header and decrypt firmware to .bin file
-    patch   Apply 'no lie' temperature patch (BNE -> NOP)
+    patch   Apply patches (default: both; --only nolie|nologo for one)
 
 The firmware uses simple XOR 0xFF obfuscation on the payload bytes.
 Image base: 0x08005000 (Cortex-M4F)
@@ -533,10 +672,14 @@ Image base: 0x08005000 (Cortex-M4F)
 
     # Patch command
     parser_patch = subparsers.add_parser(
-        "patch", help="Apply 'no lie' temperature patch"
+        "patch", help="Apply patches (default: both nolie and nologo)"
     )
     parser_patch.add_argument("file", help="Input .atk firmware file")
     parser_patch.add_argument("output", nargs="?", help="Output .atk file (optional)")
+    parser_patch.add_argument(
+        "--only", choices=("nolie", "nologo"), default=None,
+        help="Apply only the selected patch (default: apply both)",
+    )
 
     args = parser.parse_args()
 

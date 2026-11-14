@@ -83,7 +83,7 @@ The two LCD waits are the only ones worth trimming: MIPI DCS requires ≥120 ms 
 The "fastlcd" patch rewrites the three `movs r0, #imm` delay arguments (single halfword each, 3 bytes total in the image). Sites are located version-agnostically: the delay routine is found via the unique SLPOUT…DISPON command cluster, then the waits are identified as its only `100/100`-adjacent and `200` callers. It is applied by default; to skip it (it alters hardware timing, unlike the other two patches), select only the other two if the panel ever fails to initialize on cold boot:
 
 ```bash
-python3 t90_fw_tool.py patch --only nolie --only nologo t90.atk   # -> t90_v1.1.4_nolie_nologo.atk
+python3 t90_fw_tool.py patch --only nolie,nologo t90.atk   # -> t90_v1.1.4_nolie_nologo.atk
 ```
 
 A plain `python3 t90_fw_tool.py patch t90.atk` applies all three patches.
@@ -195,11 +195,11 @@ python3 t90_fw_tool.py patch t90.atk
 ```
 This writes `t90_v1.1.4_nolie_nologo_fastlcd.atk` (auto-inserts the firmware version and the `_nolie_nologo_fastlcd` suffix).
 
-To apply only a subset (`--only` can be repeated; the default run equals `--only nolie --only nologo --only fastlcd`):
+To apply only a subset (comma-separated in one flag; the default run equals `--only nolie,nologo,fastlcd`):
 
 ```bash
 python3 t90_fw_tool.py patch --only nolie t90.atk                    # -> t90_v1.1.4_nolie.atk
-python3 t90_fw_tool.py patch --only nolie --only nologo t90.atk      # -> t90_v1.1.4_nolie_nologo.atk
+python3 t90_fw_tool.py patch --only nolie,nologo t90.atk             # -> t90_v1.1.4_nolie_nologo.atk
 python3 t90_fw_tool.py patch --only fastlcd t90.atk                  # -> t90_v1.1.4_fastlcd.atk
 ```
 

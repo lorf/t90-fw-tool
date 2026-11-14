@@ -448,7 +448,10 @@ def find_function_location(payload, instruction=None):
 
 def cmd_patch(args):
     """Apply the selected patches (default: nolie + nologo + fastlcd)."""
-    selected = set(args.only) if args.only else {"nolie", "nologo", "fastlcd"}
+    if args.only:
+        selected = {p for group in args.only for p in group}
+    else:
+        selected = {"nolie", "nologo", "fastlcd"}
     do_nolie = "nolie" in selected
     do_nologo = "nologo" in selected
     do_fastlcd = "fastlcd" in selected
@@ -814,6 +817,22 @@ def find_lcd_waits(payload, patched=False):
     return [(sites_ab[0], want[0]), (sites_ab[1], want[1]), (site_c, want[2])]
 
 
+# Patch names selectable via --only (comma-separated, in one flag).
+PATCH_NAMES = ("nolie", "nologo", "fastlcd")
+
+
+def _parse_only(value):
+    """Parse a --only value: one patch name or several comma-separated."""
+    names = [p.strip() for p in value.split(",") if p.strip()]
+    unknown = [p for p in names if p not in PATCH_NAMES]
+    if not names or unknown:
+        bad = ", ".join(unknown) if unknown else repr(value)
+        raise argparse.ArgumentTypeError(
+            f"unknown patch(es): {bad} (choose from {', '.join(PATCH_NAMES)})"
+        )
+    return names
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Alientek T90 firmware analysis and patching tool",
@@ -849,9 +868,9 @@ Image base: 0x08005000 (Cortex-M4F)
     parser_patch.add_argument("file", help="Input .atk firmware file")
     parser_patch.add_argument("output", nargs="?", help="Output .atk file (optional)")
     parser_patch.add_argument(
-        "--only", action="append", choices=("nolie", "nologo", "fastlcd"),
-        default=None, metavar="PATCH",
-        help="Apply only the selected patch; repeat for several "
+        "--only", action="append", type=_parse_only, default=None,
+        metavar="PATCH[,PATCH]",
+        help="Apply only the selected patches, comma-separated "
              "(default: all three)",
     )
 

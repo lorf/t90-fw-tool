@@ -528,7 +528,7 @@ def cmd_patch(args):
         anim_off = find_logo_anim(new_payload)
         if anim_off is None:
             if find_logo_anim_patch(new_payload) is not None:
-                print(f"Logo animation already skipped (patch present).")
+                print(f"Logo animation already applied (patch present).")
             else:
                 print("Error: logo animation pattern not found.", file=sys.stderr)
                 print("  Unsupported firmware version?", file=sys.stderr)

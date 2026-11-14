@@ -10,20 +10,20 @@ Patch the firmware in one command:
 python3 t90_fw_tool.py patch t90.atk
 ```
 
-This writes `t90_v<version>_nolie_nologo.atk` — the patched firmware with fake temperature compensation removed and the boot logo animation skipped. You can flash it using [atflash](https://github.com/mishka-zz/atflash) or the official Alientek upgrade protocol.
+This writes `t90_v<version>_nolie_nologo.atk` — the patched firmware with fake temperature display compensation removed and the boot logo animation skipped. You can flash it using [atflash](https://github.com/mishka-zz/atflash) or the official Alientek upgrade protocol.
 
 ## Overview
 
 This tool supports three operations on `.atk` firmware files:
 - **info**: Display firmware header, vector table, extracted firmware version, and patch status
 - **extract**: Strip the header and decrypt the firmware payload to a raw `.bin` file
-- **patch**: Apply the "nolie" temperature patch and the "nologo" boot logo skip
+- **patch**: Apply the "nolie" temperature display patch and the "nologo" boot logo skip
 
 > **Note:** The `app_ver` field in the firmware header is always `1.0.01` regardless of the actual version. The real firmware version is extracted from a Thumb self-check pattern in the decrypted payload, and falls back to the filename if the pattern is not found.
 
 ### The "Nolie" Patch
 
-The T90 firmware contains temperature compensation code that can display inaccurate temperature readings. The "nolie" patch removes this behavior by:
+The T90 firmware contains display-only compensation code that offsets the **shown** temperature, so the display can read inaccurately. The "nolie" patch removes this display offset by:
 
 1. **Finding** the function with the signature pattern:
    ```asm
@@ -32,12 +32,14 @@ The T90 firmware contains temperature compensation code that can display inaccur
    MOV  R5, R1
    MOV  R6, R2
    CMP  R5, R4          ; compare two parameters
-   BNE  <lie_code>      ; branch to fake temperature adjustment
+   BNE  <lie_code>      ; branch to fake temperature display adjustment
    MOV  R0, R4          ; return real value (early exit)
    POP  {R4, R5, R6, PC}
    ```
 
-2. **Replacing** the `BNE` instruction with `NOP`, so the code always returns the real temperature value instead of applying compensation.
+2. **Replacing** the `BNE` instruction with `NOP`, so the code always returns the real temperature value instead of applying the display compensation.
+
+> **Scope:** this patch only affects the **displayed** temperature. It changes neither the actual soldering iron tip temperature (heater control loop) nor the measured temperature — only the number shown on screen.
 
 Unlike tools that patch at fixed byte offsets, this script:
 - Searches for the function pattern across the firmware
@@ -149,7 +151,7 @@ Patch location found at payload offset 0x820A (ARM 0x0800D20A)
 Current instruction at 0x0800D20A: 0xD101
   BNE #+6 -> jumps to 0x0800D210 (the 'lie' code)
   New instruction: 0xBF00 (NOP)
-  This removes the 'lie' temperature compensation
+  This removes the 'lie' temperature display compensation
 Logo animation init at payload offset 0x0FB84 (ARM 0x08014B84): mvn.w r4, #0x26 (-39)
     OK   CBNZ r0: 0xBB30
     OK   MOVS r0, #0: 0x2000

@@ -8,9 +8,10 @@ Usage:
     t90_fw_tool.py patch [--only nolie|nologo] <file.atk> [out.atk]
                                     # Apply patches (default: both)
 
-The "no lie" patch removes the fake temperature reading compensation
-from the T90 soldering iron firmware by replacing a conditional branch
-(BNE) with a NOP instruction.
+The "no lie" patch removes the fake temperature reading display
+compensation from the T90 soldering iron firmware by replacing a
+conditional branch (BNE) with a NOP instruction. Scope: displayed
+temperature only — tip control and measurement are unaffected.
 
 The "nologo" patch skips the boot logo animation loop (mvn.w r4, #0x26
 -> movs r4, #2; nop), reducing logo show time to zero while keeping
@@ -493,7 +494,7 @@ def cmd_patch(args):
         struct.pack_into("<H", new_payload, patch_offset, THUMB_NOP)
 
         print(f"  New instruction: 0x{THUMB_NOP:04X} (NOP)")
-        print(f"  This removes the 'lie' temperature compensation")
+        print(f"  This removes the 'lie' temperature display compensation")
 
     if do_nologo:
         # Apply logo animation skip: mvn.w r4, #0x26 -> movs r4, #2; nop

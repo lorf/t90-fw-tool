@@ -490,44 +490,38 @@ def cmd_patch(args):
 
         if patch_offset is None:
             if find_function_location(new_payload, instruction=THUMB_NOP) is not None:
-                print("Error: firmware is already patched (NOP found instead of BNE).",
-                      file=sys.stderr)
+                print(f"Nolie patch already applied (NOP present).")
             else:
                 print("Error: Could not find the 'lie' patch location in firmware.", file=sys.stderr)
                 print("  The function signature pattern was not found.", file=sys.stderr)
                 print("  This may be a different firmware version or already patched.", file=sys.stderr)
-            return 1
-
-        print(f"Patch location found at payload offset 0x{patch_offset:04X} "
-            f"(ARM 0x{0x08005000 + patch_offset:08X})")
-
-        # Read the current instruction (should be BNE)
-        current_hw = struct.unpack_from("<H", new_payload, patch_offset)[0]
-        arm_addr = 0x08005000 + patch_offset
-
-        print(f"Current instruction at 0x{arm_addr:08X}: 0x{current_hw:04X}")
-
-        # Decode it to show what we're replacing
-        if (current_hw & 0xFF00) == 0xD100 and (current_hw & 0x0F00) == 0x0100:
-            imm = current_hw & 0xFF
-            target_offset = patch_offset + imm * 2 + 4
-            target_addr = 0x08005000 + target_offset
-            print(f"  BNE #{imm*2+4:+d} -> jumps to 0x{target_addr:08X} (the 'lie' code)")
+                return 1
         else:
-            print(f"  WARNING: Expected BNE, found different instruction", file=sys.stderr)
-            print(f"  Not patching - aborting for safety", file=sys.stderr)
-            return 1
+            print(f"Patch location found at payload offset 0x{patch_offset:04X} "
+                f"(ARM 0x{0x08005000 + patch_offset:08X})")
 
-        # Check if already patched (NOP)
-        if current_hw == THUMB_NOP:
-            print("Firmware is already patched (NOP found instead of BNE)", file=sys.stderr)
-            return 1
+            # Read the current instruction (should be BNE)
+            current_hw = struct.unpack_from("<H", new_payload, patch_offset)[0]
+            arm_addr = 0x08005000 + patch_offset
 
-        # Apply patch: BNE -> NOP
-        struct.pack_into("<H", new_payload, patch_offset, THUMB_NOP)
+            print(f"Current instruction at 0x{arm_addr:08X}: 0x{current_hw:04X}")
 
-        print(f"  New instruction: 0x{THUMB_NOP:04X} (NOP)")
-        print(f"  This removes the 'lie' temperature display compensation")
+            # Decode it to show what we're replacing
+            if (current_hw & 0xFF00) == 0xD100 and (current_hw & 0x0F00) == 0x0100:
+                imm = current_hw & 0xFF
+                target_offset = patch_offset + imm * 2 + 4
+                target_addr = 0x08005000 + target_offset
+                print(f"  BNE #{imm*2+4:+d} -> jumps to 0x{target_addr:08X} (the 'lie' code)")
+            else:
+                print(f"  WARNING: Expected BNE, found different instruction", file=sys.stderr)
+                print(f"  Not patching - aborting for safety", file=sys.stderr)
+                return 1
+
+            # Apply patch: BNE -> NOP
+            struct.pack_into("<H", new_payload, patch_offset, THUMB_NOP)
+
+            print(f"  New instruction: 0x{THUMB_NOP:04X} (NOP)")
+            print(f"  This removes the 'lie' temperature display compensation")
 
     if do_nologo:
         # Apply logo animation skip: mvn.w r4, #0x26 -> movs r4, #2; nop

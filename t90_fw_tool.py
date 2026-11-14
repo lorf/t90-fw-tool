@@ -5,8 +5,8 @@ t90_fw_tool.py - Alientek T90 firmware analysis and patching tool
 Usage:
     t90_fw_tool.py info <file.atk>          # Print firmware header information
     t90_fw_tool.py extract <file.atk> [out.bin]  # Strip header, decrypt to .bin
-    t90_fw_tool.py patch [--only nolie|nologo] <file.atk> [out.atk]
-                                    # Apply patches (default: both)
+    t90_fw_tool.py patch [--only ...] <file.atk> [out.atk]
+                                    # Apply patches (default: all)
 
 The "no lie" patch removes the fake temperature reading display
 compensation from the T90 soldering iron firmware by replacing a
@@ -16,6 +16,13 @@ temperature only — tip control and measurement are unaffected.
 The "nologo" patch skips the boot logo animation loop (mvn.w r4, #0x26
 -> movs r4, #2; nop), reducing logo show time to zero while keeping
 the boot state machine intact.
+
+The "fastlcd" patch shortens the LCD controller init waits
+(100,100,200 ms -> 70,70,120 ms), saving ~140 ms of blank-screen time
+at boot. The trimmed values stay within the MIPI DCS minimums
+(120 ms after reset, 120 ms after SLPOUT). Unlike the other two
+patches it alters hardware timing, so use --only to skip it if the
+panel ever fails to initialize on cold boot.
 
 Firmware version extraction: the T90 firmware contains a version
 self-check function (Thumb) that loads its own version as a
@@ -190,6 +197,18 @@ def cmd_info(args):
         print(f"  nologo:   already patched (movs r4, #2; nop present, logo skipped)")
     else:
         print(f"  nologo:   unknown (logo animation pattern not found - "
+              f"unsupported firmware version?)")
+
+    lcd = find_lcd_waits(payload, patched=False)
+    lcd_patched = find_lcd_waits(payload, patched=True)
+    if lcd is not None:
+        vals = ", ".join(f"{v} ms" for _, v in lcd)
+        print(f"  fastlcd:  not patched (LCD waits: {vals})")
+    elif lcd_patched is not None:
+        vals = ", ".join(f"{v} ms" for _, v in lcd_patched)
+        print(f"  fastlcd:  already patched (LCD waits: {vals})")
+    else:
+        print(f"  fastlcd:  unknown (LCD init wait pattern not found - "
               f"unsupported firmware version?)")
 
     return 0
@@ -428,9 +447,11 @@ def find_function_location(payload, instruction=None):
 
 
 def cmd_patch(args):
-    """Apply the selected patches (default: both nolie and nologo)."""
-    do_nolie = args.only in (None, "nolie")
-    do_nologo = args.only in (None, "nologo")
+    """Apply the selected patches (default: nolie + nologo + fastlcd)."""
+    selected = set(args.only) if args.only else {"nolie", "nologo", "fastlcd"}
+    do_nolie = "nolie" in selected
+    do_nologo = "nologo" in selected
+    do_fastlcd = "fastlcd" in selected
 
     with open(args.file, "rb") as f:
         data = bytearray(f.read())
@@ -516,6 +537,25 @@ def cmd_patch(args):
             new_payload[anim_off:anim_off + 4] = LOGO_ANIM_PATCH
             print(f"  Patched to: movs r4, #2; nop (loop runs zero times, logo skipped)")
 
+    if do_fastlcd:
+        # Shorten LCD controller init waits: 100,100,200 ms -> 70,70,120 ms.
+        waits = find_lcd_waits(new_payload, patched=False)
+        if waits is None:
+            if find_lcd_waits(new_payload, patched=True) is not None:
+                print(f"LCD waits already shortened (patch present).")
+            else:
+                print("Error: LCD init wait pattern not found.", file=sys.stderr)
+                print("  Unsupported firmware version?", file=sys.stderr)
+                return 1
+        else:
+            for (movs_off, old), new in zip(waits, LCD_WAIT_PATCH):
+                arm = 0x08005000 + movs_off
+                print(f"LCD wait at payload offset 0x{movs_off:05X} "
+                      f"(ARM 0x{arm:08X}): movs r0, #{old} -> movs r0, #{new}")
+                struct.pack_into("<H", new_payload, movs_off, 0x2000 | new)
+            print(f"  Patched to: LCD waits {list(LCD_WAIT_PATCH)} ms "
+                  f"(saves ~{sum(LCD_WAIT_ORIG) - sum(LCD_WAIT_PATCH)} ms of boot time)")
+
     # Re-encrypt the payload
     encrypted_payload = xor_decrypt(bytes(new_payload))
 
@@ -523,12 +563,13 @@ def cmd_patch(args):
     output = bytearray(data[:13])  # Keep original header
     output.extend(encrypted_payload)
 
-    if do_nolie and do_nologo:
-        suffix = "_nolie_nologo"
-    elif do_nolie:
-        suffix = "_nolie"
-    else:
-        suffix = "_nologo"
+    suffix = ""
+    for name in ("nolie", "nologo", "fastlcd"):
+        if name in selected:
+            suffix += "_" + name
+    if not suffix:
+        print("Error: no patches selected.", file=sys.stderr)
+        return 1
     # Determine output file
     if args.output:
         output_file = args.output
@@ -537,10 +578,15 @@ def cmd_patch(args):
             base, ext = args.file[:-4], ".atk"
         else:
             base, ext = args.file, ""
-        for old in ("_nolie_nologo", "_nologo", "_nolie"):
-            if base.endswith(old):
-                base = base[:-len(old)]
-        # Version goes before the suffix: t90_v1.1.4_nolie_nologo.atk
+        # Strip any previous patch suffixes so re-runs never stack them.
+        changed = True
+        while changed:
+            changed = False
+            for old in ("_nolie", "_nologo", "_fastlcd"):
+                if base.endswith(old):
+                    base = base[:-len(old)]
+                    changed = True
+        # Version goes before the suffixes: t90_v1.1.4_nolie_nologo.atk
         output_file = make_versioned_filename(base, version) + suffix + ext
 
     # Add the firmware version to the name if it's not already there
@@ -641,6 +687,133 @@ def find_logo_anim_patch(payload):
         start = idx + 1
 
 
+# Millisecond busy-wait used all over the firmware (LCD init, beep, task
+# pacing). Shape (identical bytes in v1.1.4/v1.1.5/v1.1.6, address varies):
+#     push {r4, lr}; mov r4, r0; b <loop>; mov.w r0, #0x3E8; bl <tick>;
+#     subs; sub.w; bne <loop>; pop {r4, pc}
+# so delay_ms(n) waits n * delay_us(1000).
+MS_DELAY_HEAD = bytes([0x10, 0xB5, 0x04, 0x46, 0x03, 0xE0,
+                       0x4F, 0xF4, 0x7A, 0x70])
+
+# LCD controller init waits (ms) and their trimmed replacements.
+# MIPI DCS requires >=120 ms after reset and >=120 ms after SLPOUT;
+# stock uses a conservative 200/200. Trimmed values keep spec compliance.
+LCD_WAIT_ORIG = (100, 100, 200)
+LCD_WAIT_PATCH = (70, 70, 120)
+
+
+def _bl_target(payload, addr):
+    """Decode a 32-bit Thumb BL at ARM address addr; None if not a BL."""
+    import ctypes
+    off = addr - 0x08005000
+    h1 = struct.unpack_from("<H", payload, off)[0]
+    h2 = struct.unpack_from("<H", payload, off + 2)[0]
+    if (h1 >> 11) != 0b11110:
+        return None
+    if (h2 & 0xF000) != 0xF000 or not (h2 & 0x1000):
+        return None
+    s = (h1 >> 10) & 1
+    j1 = (h2 >> 13) & 1
+    j2 = (h2 >> 11) & 1
+    v = (s << 24) | ((~(j1 ^ s) & 1) << 23) | ((~(j2 ^ s) & 1) << 22) \
+        | ((h1 & 0x3FF) << 12) | ((h2 & 0x7FF) << 1)
+    v = ctypes.c_int32((v << 7) & 0xFFFFFFFF).value >> 7
+    return (addr + 4 + v) & 0xFFFFFFFF
+
+
+def find_ms_delay(payload):
+    """Find the payload offset of the delay_ms() routine.
+
+    Anchored on the LCD init SLPOUT wait: the unique sequence
+        movs r0, #0x11; bl <cmd>; movs r0, #0xC8; bl <delay>;
+        ...; movs r0, #0x29
+    The delay callee is verified by its distinctive head bytes.
+    Returns the payload offset, or None.
+    """
+    raw = bytes(payload)
+    start = 0
+    while True:
+        idx = raw.find(bytes([0x11, 0x20]), start)  # movs r0, #0x11
+        if idx < 0:
+            return None
+        # Expect: movs(2) bl32(4) movs(2) bl32(4), then 0x29 0x20 nearby.
+        # The middle movs holds the SLPOUT wait (200 stock, 120 patched).
+        if idx + 12 <= len(raw) and raw[idx + 6] in (0xC8, 0x78) \
+                and raw[idx + 7] == 0x20 \
+                and bytes([0x29, 0x20]) in raw[idx:idx + 16]:
+            h1 = struct.unpack_from("<H", payload, idx + 2)[0]
+            h1b = struct.unpack_from("<H", payload, idx + 8)[0]
+            if (h1 >> 11) == 0b11110 and (h1b >> 11) == 0b11110:
+                target = _bl_target(payload, 0x08005000 + idx + 8)
+                if target is not None:
+                    doff = target - 0x08005000
+                    if 0 <= doff < len(payload) - len(MS_DELAY_HEAD) \
+                            and raw[doff:doff + len(MS_DELAY_HEAD)] == MS_DELAY_HEAD:
+                        return doff
+        start = idx + 1
+
+
+def find_lcd_waits(payload, patched=False):
+    """Find the three LCD-init wait arguments (movs r0, #imm before BL delay).
+
+    Unpatched: two adjacent `movs r0, #100` (post-reset settle) plus the
+    single `movs r0, #200` inside the SLPOUT(0x11)..DISPON(0x29) cluster.
+    Patched: same sites with 70/70/120. Other delay_ms() callers (beep,
+    task pacing, touch init) use different values and are never matched.
+
+    Returns [(movs_offset, imm)] x3 in code order, or None.
+    """
+    delay_off = find_ms_delay(payload)
+    if delay_off is None:
+        return None
+    delay_addr = 0x08005000 + delay_off
+    want = LCD_WAIT_PATCH if patched else LCD_WAIT_ORIG
+
+    # Collect every (bl_addr, imm) calling delay_ms via `movs r0, #imm`.
+    callers = []
+    for off in range(0, len(payload) - 2, 2):
+        if (struct.unpack_from("<H", payload, off)[0] >> 11) != 0b11110:
+            continue
+        h2 = struct.unpack_from("<H", payload, off + 2)[0]
+        if (h2 & 0xF000) != 0xF000 or not (h2 & 0x1000):
+            continue
+        if _bl_target(payload, 0x08005000 + off) != delay_addr:
+            continue
+        h = struct.unpack_from("<H", payload, off - 2)[0]
+        imm = h & 0xFF if (h & 0xFF00) == 0x2000 else None
+        callers.append((off - 2, imm))  # movs offset, imm
+
+    by_addr = dict(callers)
+    # Site C: the unique caller with the wanted 3rd value inside the
+    # SLPOUT..DISPON cluster (anchor-verified).
+    site_c = None
+    raw = bytes(payload)
+    start = 0
+    while True:
+        idx = raw.find(bytes([0x11, 0x20]), start)
+        if idx < 0:
+            break
+        cand = idx + 6  # movs offset of the wait inside the cluster
+        if by_addr.get(cand) == want[2] \
+                and bytes([0x29, 0x20]) in raw[idx:idx + 16]:
+            site_c = cand
+            break
+        start = idx + 1
+    if site_c is None:
+        return None
+    # Sites A/B: the unique adjacent pair with the wanted 1st/2nd values.
+    sites_ab = None
+    addrs = sorted(by_addr)
+    for a, b in zip(addrs, addrs[1:]):
+        if b - a == 6 and by_addr[a] == want[0] and by_addr[b] == want[1]:
+            if sites_ab is not None:  # ambiguous - refuse to patch
+                return None
+            sites_ab = (a, b)
+    if sites_ab is None:
+        return None
+    return [(sites_ab[0], want[0]), (sites_ab[1], want[1]), (site_c, want[2])]
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Alientek T90 firmware analysis and patching tool",
@@ -648,8 +821,8 @@ def main():
         epilog="""
 Commands:
     info    Print firmware header and vector table information
-    extract Strip header and decrypt firmware to .bin file
-    patch   Apply patches (default: both; --only nolie|nologo for one)
+    extract Strip header and decrypt firmware payload to .bin file
+    patch   Apply patches (default: all; --only to select)
 
 The firmware uses simple XOR 0xFF obfuscation on the payload bytes.
 Image base: 0x08005000 (Cortex-M4F)
@@ -671,13 +844,15 @@ Image base: 0x08005000 (Cortex-M4F)
 
     # Patch command
     parser_patch = subparsers.add_parser(
-        "patch", help="Apply patches (default: both nolie and nologo)"
+        "patch", help="Apply patches (default: all)"
     )
     parser_patch.add_argument("file", help="Input .atk firmware file")
     parser_patch.add_argument("output", nargs="?", help="Output .atk file (optional)")
     parser_patch.add_argument(
-        "--only", choices=("nolie", "nologo"), default=None,
-        help="Apply only the selected patch (default: apply both)",
+        "--only", action="append", choices=("nolie", "nologo", "fastlcd"),
+        default=None, metavar="PATCH",
+        help="Apply only the selected patch; repeat for several "
+             "(default: all three)",
     )
 
     args = parser.parse_args()

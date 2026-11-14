@@ -10,14 +10,14 @@ Patch the firmware in one command:
 python3 t90_fw_tool.py patch t90.atk
 ```
 
-This writes `t90_v<version>_nolie_nologo.atk` — the patched firmware with fake temperature display compensation removed and the boot logo animation skipped. You can flash it using [atflash](https://github.com/mishka-zz/atflash) or the official Alientek upgrade protocol.
+This writes `t90_v<version>_nolie_nologo_fastlcd.atk` — the patched firmware with fake temperature display compensation removed, the boot logo animation skipped, and the LCD init waits shortened. You can flash it using [atflash](https://github.com/mishka-zz/atflash) or the official Alientek upgrade protocol.
 
 ## Overview
 
 This tool supports three operations on `.atk` firmware files:
 - **info**: Display firmware header, vector table, extracted firmware version, and patch status
 - **extract**: Strip the header and decrypt the firmware payload to a raw `.bin` file
-- **patch**: Apply the "nolie" temperature display patch and the "nologo" boot logo skip
+- **patch**: Apply the "nolie" temperature display patch, the "nologo" boot logo skip, and the "fastlcd" LCD-timing trim
 
 > **Note:** The `app_ver` field in the firmware header is always `1.0.01` regardless of the actual version. The real firmware version is extracted from a Thumb self-check pattern in the decrypted payload, and falls back to the filename if the pattern is not found.
 
@@ -65,7 +65,30 @@ At boot the firmware draws the 160x40 logo in a sliding-animation loop (~21 full
 
 2. **Replacing** `mvn.w r4, #0x26` with `movs r4, #2; nop`, so the loop-exit condition (`r4 >= 2`) is already true and zero draws run. Every raw byte-match is validated against the neighbours above, so a stray byte sequence inside bitmap/data cannot be mispatched.
 
-`patch` applies both patches in one run.
+`patch` applies all three patches in one run.
+
+### The "Fastlcd" Patch
+
+Even with the logo animation skipped, ~470 ms of fixed busy-wait delays remain on the boot path (measured by disassembly, identical layout in v1.1.4/v1.1.5/v1.1.6):
+
+| Wait | Location | Purpose | Stock | Trimmed |
+|------|----------|---------|-------|---------|
+| post-reset settle ×2 | LCD init (`0x08009B70`) | panel power-on stabilization | 100 + 100 ms | 70 + 70 ms |
+| SLPOUT → DISPON | LCD init (`0x0800A0BE`) | MIPI DCS power-on sequence (`0x11` … `0x29`) | 200 ms | 120 ms |
+| boot pacing / beep | boot task | frame pacing, 20 ms beep | 20 + 20 ms | left as-is |
+| panel/touch init | panel init | register setup | 5+10+2+10+2 ms | left as-is |
+
+The two LCD waits are the only ones worth trimming: MIPI DCS requires ≥120 ms after reset and ≥120 ms after SLPOUT, so 140/120 ms keeps spec compliance (stock 200/200 is conservative). The remaining ~30 ms of small waits are left untouched — negligible gain, unknown hardware constraints.
+
+The "fastlcd" patch rewrites the three `movs r0, #imm` delay arguments (single halfword each, 3 bytes total in the image). Sites are located version-agnostically: the delay routine is found via the unique SLPOUT…DISPON command cluster, then the waits are identified as its only `100/100`-adjacent and `200` callers. It is applied by default; pass `--only` to skip it if the panel ever fails to initialize on cold boot (it alters hardware timing, unlike the other two patches):
+
+```bash
+python3 t90_fw_tool.py patch --only fastlcd t90.atk   # -> t90_v1.1.4_fastlcd.atk
+```
+
+A plain `python3 t90_fw_tool.py patch t90.atk` applies all three patches.
+
+Combined with nologo (which skips the ~21-draw logo animation loop entirely), this removes the last large fixed delay on the boot path: ~140 ms saved on top of the skipped animation.
 
 ## Installation
 
@@ -113,6 +136,7 @@ Size: 104461 bytes (header: 13 + payload: 104448)
 === Patches ===
   nolie:    not patched (BNE at payload offset 0x820A, ARM 0x0800D20A)
   nologo:   not patched (mvn.w r4, #0x26 at payload offset 0x0FB84, ARM 0x08014B84)
+  fastlcd:  not patched (LCD waits: 100 ms, 100 ms, 200 ms)
 ```
 
 ### Extract
@@ -134,7 +158,7 @@ This produces a raw binary file named `<basename>_v<version>.bin` (e.g. `t90_v1.
 ### Patch
 
 ```bash
-python3 t90_fw_tool.py patch t90.atk t90_nolie_nologo.atk
+python3 t90_fw_tool.py patch t90.atk t90_nolie_nologo_fastlcd.atk
 ```
 
 Output:
@@ -154,8 +178,12 @@ Logo animation init at payload offset 0x0FB84 (ARM 0x08014B84): mvn.w r4, #0x26 
     OK   BLT <redraw>: 0xDB00
     OK   MOVS r4, #0: 0x2400
   Patched to: movs r4, #2; nop (loop runs zero times, logo skipped)
+LCD wait at payload offset 0x04B76 (ARM 0x08009B76): movs r0, #100 -> movs r0, #70
+LCD wait at payload offset 0x04B7C (ARM 0x08009B7C): movs r0, #100 -> movs r0, #70
+LCD wait at payload offset 0x050BC (ARM 0x0800A0BC): movs r0, #200 -> movs r0, #120
+  Patched to: LCD waits [70, 70, 120] ms (saves ~140 ms of boot time)
 
-Patched firmware written to: t90_v1.1.4_nolie_nologo.atk
+Patched firmware written to: t90_v1.1.4_nolie_nologo_fastlcd.atk
   Original size: 104461 bytes
   Output size:   104461 bytes
   Firmware version: 1.1.4
@@ -165,13 +193,14 @@ Without explicit output:
 ```bash
 python3 t90_fw_tool.py patch t90.atk
 ```
-This writes `t90_v1.1.4_nolie_nologo.atk` (auto-inserts the firmware version and `_nolie_nologo` suffix).
+This writes `t90_v1.1.4_nolie_nologo_fastlcd.atk` (auto-inserts the firmware version and the `_nolie_nologo_fastlcd` suffix).
 
-To apply only one patch:
+To apply only a subset (`--only` can be repeated; the default run equals `--only nolie --only nologo --only fastlcd`):
 
 ```bash
-python3 t90_fw_tool.py patch --only nolie t90.atk    # -> t90_v1.1.4_nolie.atk
-python3 t90_fw_tool.py patch --only nologo t90.atk   # -> t90_v1.1.4_nologo.atk
+python3 t90_fw_tool.py patch --only nolie t90.atk                    # -> t90_v1.1.4_nolie.atk
+python3 t90_fw_tool.py patch --only nolie --only nologo t90.atk      # -> t90_v1.1.4_nolie_nologo.atk
+python3 t90_fw_tool.py patch --only fastlcd t90.atk                  # -> t90_v1.1.4_fastlcd.atk
 ```
 
 ## References

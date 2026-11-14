@@ -113,14 +113,6 @@ Size: 104461 bytes (header: 13 + payload: 104448)
 === Patches ===
   nolie:    not patched (BNE at payload offset 0x820A, ARM 0x0800D20A)
   nologo:   not patched (mvn.w r4, #0x26 at payload offset 0x0FB84, ARM 0x08014B84)
-      OK   CBNZ r0: 0xBB30
-      OK   MOVS r0, #0: 0x2000
-      OK   LDR Rt, [PC, #imm] (r1): 0x493B
-      OK   STRB r0, [r1]: 0x7008
-      OK   B <loop>: 0xE015
-      OK   CMP r4, #0: 0x2C00
-      OK   BLT <redraw>: 0xDB00
-      OK   MOVS r4, #0: 0x2400
 ```
 
 ### Extract

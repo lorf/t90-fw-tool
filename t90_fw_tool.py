@@ -186,8 +186,6 @@ def cmd_info(args):
         arm = 0x08005000 + anim_off
         print(f"  nologo:   not patched (mvn.w r4, #0x26 at payload offset 0x{anim_off:05X}, "
               f"ARM 0x{arm:08X})")
-        for desc, _, actual, ok in verify_logo_anim(payload, anim_off):
-            print(f"      {'OK ' if ok else 'FAIL'}  {desc}: {actual}")
     elif find_logo_anim_patch(payload) is not None:
         print(f"  nologo:   already patched (movs r4, #2; nop present, logo skipped)")
     else:

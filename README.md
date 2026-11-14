@@ -80,10 +80,10 @@ Even with the logo animation skipped, ~470 ms of fixed busy-wait delays remain o
 
 The two LCD waits are the only ones worth trimming: MIPI DCS requires ≥120 ms after reset and ≥120 ms after SLPOUT, so 140/120 ms keeps spec compliance (stock 200/200 is conservative). The remaining ~30 ms of small waits are left untouched — negligible gain, unknown hardware constraints.
 
-The "fastlcd" patch rewrites the three `movs r0, #imm` delay arguments (single halfword each, 3 bytes total in the image). Sites are located version-agnostically: the delay routine is found via the unique SLPOUT…DISPON command cluster, then the waits are identified as its only `100/100`-adjacent and `200` callers. It is applied by default; to skip it (it alters hardware timing, unlike the other two patches), select only the other two if the panel ever fails to initialize on cold boot:
+The "fastlcd" patch rewrites the three `movs r0, #imm` delay arguments (single halfword each, 3 bytes total in the image). Sites are located version-agnostically: the delay routine is found via the unique SLPOUT…DISPON command cluster, then the waits are identified as its only `100/100`-adjacent and `200` callers. It is applied by default; to skip it (it alters hardware timing, unlike the other two patches), use `--skip` if the panel ever fails to initialize on cold boot:
 
 ```bash
-python3 t90_fw_tool.py patch --only nolie,nologo t90.atk   # -> t90_v1.1.4_nolie_nologo.atk
+python3 t90_fw_tool.py patch --skip fastlcd t90.atk   # -> t90_v1.1.4_nolie_nologo.atk
 ```
 
 A plain `python3 t90_fw_tool.py patch t90.atk` applies all three patches.
@@ -203,6 +203,12 @@ To apply only a subset (comma-separated in one flag; the default run equals `--o
 python3 t90_fw_tool.py patch --only nolie t90.atk                    # -> t90_v1.1.4_nolie.atk
 python3 t90_fw_tool.py patch --only nolie,nologo t90.atk             # -> t90_v1.1.4_nolie_nologo.atk
 python3 t90_fw_tool.py patch --only fastlcd t90.atk                  # -> t90_v1.1.4_fastlcd.atk
+```
+
+Or skip selected patches with `--skip` (the inverse; cannot be combined with `--only`):
+
+```bash
+python3 t90_fw_tool.py patch --skip fastlcd t90.atk                  # -> t90_v1.1.4_nolie_nologo.atk
 ```
 
 ## References

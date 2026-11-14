@@ -5,7 +5,7 @@ t90_fw_tool.py - Alientek T90 firmware analysis and patching tool
 Usage:
     t90_fw_tool.py info <file.atk>          # Print firmware header information
     t90_fw_tool.py extract <file.atk> [out.bin]  # Strip header, decrypt to .bin
-    t90_fw_tool.py patch [--only ...] <file.atk> [out.atk]
+    t90_fw_tool.py patch [--only ... | --skip ...] <file.atk> [out.atk]
                                     # Apply patches (default: all)
 
 The "no lie" patch removes the fake temperature reading display
@@ -450,8 +450,10 @@ def cmd_patch(args):
     """Apply the selected patches (default: nolie + nologo + fastlcd)."""
     if args.only:
         selected = {p for group in args.only for p in group}
+    elif args.skip:
+        selected = set(PATCH_NAMES) - {p for group in args.skip for p in group}
     else:
-        selected = {"nolie", "nologo", "fastlcd"}
+        selected = set(PATCH_NAMES)
     do_nolie = "nolie" in selected
     do_nologo = "nologo" in selected
     do_fastlcd = "fastlcd" in selected
@@ -872,11 +874,17 @@ Image base: 0x08005000 (Cortex-M4F)
     )
     parser_patch.add_argument("file", help="Input .atk firmware file")
     parser_patch.add_argument("output", nargs="?", help="Output .atk file (optional)")
-    parser_patch.add_argument(
+    selector = parser_patch.add_mutually_exclusive_group()
+    selector.add_argument(
         "--only", action="append", type=_parse_only, default=None,
         metavar="PATCH[,PATCH]",
         help="Apply only the selected patches, comma-separated "
              "(default: all three)",
+    )
+    selector.add_argument(
+        "--skip", action="append", type=_parse_only, default=None,
+        metavar="PATCH[,PATCH]",
+        help="Apply all patches except the given ones, comma-separated",
     )
 
     args = parser.parse_args()

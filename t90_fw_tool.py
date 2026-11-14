@@ -870,7 +870,12 @@ Image base: 0x08005000 (Cortex-M4F)
 
     # Patch command
     parser_patch = subparsers.add_parser(
-        "patch", help="Apply patches (default: all)"
+        "patch", help="Apply patches (default: all)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""patches:
+  nolie    remove fake temperature display compensation (BNE -> NOP)
+  nologo   skip the boot logo animation (draw loop runs zero times)
+  fastlcd  shorten the LCD init waits (100,100,200 ms -> 70,70,120 ms)""",
     )
     parser_patch.add_argument("file", help="Input .atk firmware file")
     parser_patch.add_argument("output", nargs="?", help="Output .atk file (optional)")

@@ -23,7 +23,7 @@ This tool supports three operations on `.atk` firmware files:
 
 ### The "Nolie" Patch
 
-The T90 firmware contains display-only compensation code that offsets the **shown** temperature, so the display can read inaccurately. The "nolie" patch removes this display offset by:
+The T90 firmware contains display-only compensation code that normalizes the **shown** temperature (hides the initial temperature overshoot, filters temperature fluctuations), so the display can read inaccurately. The "nolie" patch removes this display offset by:
 
 1. **Finding** the function with the signature pattern:
    ```asm

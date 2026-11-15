@@ -5,9 +5,6 @@ behaviour of the tool on actual .atk files from the archive.
 
 Skipped automatically when the archive directory is missing
 (override with T90_FIRMWARE_DIR).
-
-Note: the '*_earlykey*' variants use a modified delay routine, so
-fastlcd detection reports 'unknown' on them; they are skipped for now.
 """
 
 import glob
@@ -31,12 +28,7 @@ def _load(path):
 
 
 def atk_names():
-    # earlykey variants skipped for now (fastlcd pattern unknown there).
-    return [
-        os.path.basename(p)
-        for p in _archive_files()
-        if "earlykey" not in os.path.basename(p)
-    ]
+    return [os.path.basename(p) for p in _archive_files()]
 
 
 
@@ -89,6 +81,15 @@ def test_patch_status_matches_filename(name):
         waits = tool.find_lcd_waits(payload, patched=False)
         assert waits is not None, name
         assert [v for _, v in waits] == list(tool.LCD_WAIT_ORIG)
+
+    # earlykey: filenames ending in _earlykey carry the patch; the rest
+    # (including fastlcd+earlykey combos) must detect through redirects.
+    ek, cave_off, _, _ = tool.find_earlykey(payload)
+    if "_earlykey" in name:
+        assert ek == "patched", f"{name}: expected earlykey patched"
+        assert cave_off == tool.EARLYKEY_CAVE_ADDR - 0x08005000, name
+    else:
+        assert ek == "clean", f"{name}: expected earlykey clean, got {ek}"
 
 
 @pytest.mark.parametrize("name", atk_names() or ["<empty>"])

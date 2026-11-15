@@ -69,8 +69,6 @@ At boot the firmware draws the 160x40 logo in a sliding-animation loop (~21 full
 
 ### The "Fastlcd" Patch
 
-### The "Fastlcd" Patch
-
 Even with the logo animation skipped, ~470 ms of fixed busy-wait delays remain on the boot path (measured by disassembly, identical layout in v1.1.4/v1.1.5/v1.1.6):
 
 | Wait | Location | Purpose | Stock | Trimmed |
@@ -130,7 +128,7 @@ python3 -m pytest
 
 Archive tests read `~/apps/atflash/firmware/` (override with
 `T90_FIRMWARE_DIR=...`) and skip automatically when the directory is
-missing. The `*_earlykey*` variants are excluded for now.
+missing.
 
 ## Usage
 

@@ -56,6 +56,8 @@ def test_info_stock(atk_file, cli):
     assert "nolie:    not patched" in out
     assert "nologo:   not patched" in out
     assert "fastlcd:  not patched (LCD waits: 100 ms, 100 ms, 200 ms)" in out
+    assert "earlykey: not patched" in out
+    assert f"0x{synthetic.KEYSCAN_OFFSET:05X}" in out  # key-scan offset shown
     assert "File size matches bin_size + header" in out
     assert "SP address in RAM range" in out
     assert "Reset vector in Flash range" in out
@@ -70,6 +72,17 @@ def test_info_patched(atk_file, cli):
     assert "nolie:    already patched" in out
     assert "nologo:   already patched" in out
     assert "fastlcd:  already patched (LCD waits: 70 ms, 70 ms, 120 ms)" in out
+
+
+def test_info_earlykey_patched(atk_file, cli):
+    path = atk_file(payload=synthetic.build_payload(earlykey="patched"))
+    code, out, err = cli("info", path)
+    assert code == 0
+    assert "earlykey: already patched" in out
+    # Cave ARM address = image base + cave offset.
+    assert f"0x{tool.EARLYKEY_CAVE_ADDR:08X}" in out
+    # fastlcd state still visible through the redirection.
+    assert "fastlcd:  not patched (LCD waits: 100 ms, 100 ms, 200 ms)" in out
 
 
 def test_info_version_source(atk_file, cli):
@@ -268,6 +281,142 @@ def test_patch_skip_fastlcd(atk_file, tmp_path, cli):
     assert diffs == NOLIE_BYTES | LOGO_BYTES | VER_BYTES
 
 
+# --- patch: earlykey -------------------------------------------------------
+
+
+def earlykey_diff_bytes(orig_p, patched_p):
+    """Expected payload-byte diffs when earlykey redirects callers."""
+    # Cave region: every nonzero byte of the cave (initially zeros).
+    cave = tool.build_earlykey_cave(
+        tool.EARLYKEY_CAVE_ADDR,
+        0x08005000 + synthetic.DELAY_OFFSET,
+        0x08005000 + synthetic.KEYSCAN_OFFSET,
+    )
+    diffs = {
+        synthetic.CAVE_OFF + i for i, b in enumerate(cave) if b != 0
+    }
+    # Each redirected BL: bytes where cave target encoding differs.
+    for off, _imm in synthetic.ALL_DELAY_CALLERS:
+        bl = off + 2
+        src = 0x08005000 + bl
+        before = synthetic.b_bl(src, 0x08005000 + synthetic.DELAY_OFFSET)
+        after = tool._bl_encode(src, tool.EARLYKEY_CAVE_ADDR)
+        assert len(before) == len(after) == 4
+        diffs |= {bl + i for i in range(4) if before[i] != after[i]}
+    return diffs
+
+
+def test_patch_only_earlykey(atk_file, tmp_path, cli):
+    path = atk_file()
+    code, out, err = cli("patch", "--only", "earlykey", path)
+    assert code == 0, err
+    out_path = tmp_path / "t90_v1.1.6_earlykey.atk"
+    assert out_path.exists(), out
+    diffs = set(payload_diff_offsets(payload_of(read(path)),
+                                     payload_of(read(out_path))))
+    assert diffs == earlykey_diff_bytes(payload_of(read(path)),
+                                        payload_of(read(out_path)))
+    # The cave landed at the expected offset, others untouched.
+    new_p = payload_of(read(out_path))
+    assert new_p[synthetic.CAVE_OFF:synthetic.CAVE_OFF + synthetic.CAVE_LEN] != bytes(
+        synthetic.CAVE_LEN
+    )
+    # info sees through the redirect.
+    code, info, _ = cli("info", str(out_path))
+    assert "earlykey: already patched" in info
+    assert "fastlcd:  not patched" in info
+
+
+def test_default_patch_does_not_apply_earlykey(atk_file, tmp_path, cli):
+    path = atk_file()
+    code, out, err = cli("patch", path)
+    assert code == 0, err
+    out_path = tmp_path / "t90_v1.1.6_nolie_nologo_fastlcd.atk"
+    assert out_path.exists()  # no _earlykey in the name
+    new_p = payload_of(read(out_path))
+    assert new_p[synthetic.CAVE_OFF:synthetic.CAVE_OFF + synthetic.CAVE_LEN] == bytes(
+        synthetic.CAVE_LEN
+    )
+    code, info, _ = cli("info", str(out_path))
+    assert "earlykey: not patched" in info
+
+
+def test_skip_fastlcd_does_not_apply_earlykey(atk_file, tmp_path, cli):
+    path = atk_file()
+    code, out, err = cli("patch", "--skip", "fastlcd", path)
+    assert code == 0, err
+    out_path = tmp_path / "t90_v1.1.6_nolie_nologo.atk"
+    assert out_path.exists()
+    new_p = payload_of(read(out_path))
+    assert new_p[synthetic.CAVE_OFF:synthetic.CAVE_OFF + synthetic.CAVE_LEN] == bytes(
+        synthetic.CAVE_LEN
+    )
+
+
+def test_patch_earlykey_with_fastlcd(atk_file, tmp_path, cli):
+    # fastlcd runs before earlykey; both must survive together.
+    path = atk_file()
+    code, out, err = cli("patch", "--only", "fastlcd,earlykey", path)
+    assert code == 0, err
+    out_path = tmp_path / "t90_v1.1.6_fastlcd_earlykey.atk"
+    assert out_path.exists(), out
+    new_p = payload_of(read(out_path))
+    for off, imm in zip(
+        (synthetic.WAIT_A_OFFSET, synthetic.WAIT_B_OFFSET,
+         synthetic.WAIT_C_OFFSET),
+        tool.LCD_WAIT_PATCH,
+    ):
+        hw = struct.unpack_from("<H", new_p, off)[0]
+        assert hw == 0x2000 | imm
+    code, info, _ = cli("info", str(out_path))
+    assert "earlykey: already patched" in info
+    assert "fastlcd:  already patched (LCD waits: 70 ms, 70 ms, 120 ms)" in info
+
+
+def test_patch_earlykey_idempotent(atk_file, tmp_path, cli):
+    path = atk_file(payload=synthetic.build_payload(earlykey="patched"),
+                    name="t90_v1.1.6_earlykey.atk")
+    before = read(path)
+    code, out, err = cli("patch", "--only", "earlykey", path)
+    assert code == 0, err
+    assert "already applied" in out
+    out_path = tmp_path / "t90_v1.1.6_earlykey.atk"
+    assert read(out_path) == before  # byte-identical re-run
+
+
+def test_patch_earlykey_on_fastlcd_patched_input(atk_file, tmp_path, cli):
+    # Apply earlykey to an input that already has fastlcd: the redirect
+    # must not confuse the fastlcd detector.
+    path = atk_file(payload=synthetic.build_payload(fastlcd="patched"))
+    code, out, err = cli("patch", "--only", "earlykey", path)
+    assert code == 0, err
+    out_path = tmp_path / "t90_v1.1.6_fastlcd_earlykey.atk"
+    assert out_path.exists(), out
+    code, info, _ = cli("info", str(out_path))
+    assert "earlykey: already patched" in info
+    assert "fastlcd:  already patched" in info
+
+
+def test_patch_earlykey_no_keyscan_errors(atk_file, cli):
+    # Key-scan routine missing -> earlykey refuses.
+    payload = bytearray(synthetic.build_payload())
+    payload[synthetic.KEYSCAN_OFFSET:synthetic.KEYSCAN_OFFSET + 10] = bytes(10)
+    path = atk_file(payload=bytes(payload))
+    code, _, err = cli("patch", "--only", "earlykey", path)
+    assert code == 1
+    assert "delay_ms caller pattern not found" in err
+
+
+def test_patch_earlykey_occupied_cave_errors(atk_file, cli):
+    # Cave not empty -> refuse to patch.
+    payload = bytearray(synthetic.build_payload())
+    payload[synthetic.CAVE_OFF + 4] = 0xFF
+    path = atk_file(payload=bytes(payload))
+    code, _, err = cli("patch", "--only", "earlykey", path)
+    assert code == 1
+    assert "cave" in err and "not empty" in err
+
+
 def test_patch_skip_all_errors(atk_file, cli):
     path = atk_file()
     code, _, err = cli(
@@ -397,7 +546,8 @@ def test_patch_ambiguous_fastlcd_refused(atk_file, cli):
 def test_parse_only_accepts_valid():
     assert tool._parse_only("nolie") == ["nolie"]
     assert tool._parse_only("nolie, nologo") == ["nolie", "nologo"]
-    assert tool._parse_only("nolie,nologo,fastlcd") == list(tool.PATCH_NAMES)
+    assert tool._parse_only("nolie,nologo,fastlcd") == ["nolie", "nologo", "fastlcd"]
+    assert tool._parse_only("nolie,nologo,fastlcd,earlykey") == list(tool.PATCH_NAMES)
 
 
 def test_parse_only_rejects_unknown():
@@ -410,7 +560,13 @@ def test_parse_only_rejects_unknown():
 
 
 def test_patch_names_constant():
-    assert tool.PATCH_NAMES == ("nolie", "nologo", "fastlcd")
+    assert tool.PATCH_NAMES == ("nolie", "nologo", "fastlcd", "earlykey")
+
+
+def test_default_patches_exclude_earlykey():
+    # earlykey is experimental/opt-in: never in the default set.
+    assert tool.DEFAULT_PATCHES == ("nolie", "nologo", "fastlcd")
+    assert "earlykey" not in tool.DEFAULT_PATCHES
 
 
 def test_main_no_command_prints_help(capsys):

@@ -35,6 +35,10 @@ delay_ms() callers are redirected to a polling-delay routine in an
 empty flash cave (ARM 0x08006040) that samples the key-scan routine
 every 8th ms with unchanged timing. So a heater start press made
 during LCD init is acted on as soon as the main loop starts.
+NOTE: hardware testing (T90B) showed no button improvement and
+spontaneous reboots during heat-up with this patch applied (gone
+without it). It is therefore EXPERIMENTAL and opt-in only
+(--only earlykey), never applied by default.
 
 Firmware version extraction: the T90 firmware contains a version
 self-check function (Thumb) that loads its own version as a
@@ -479,13 +483,18 @@ def find_function_location(payload, instruction=None):
 
 
 def cmd_patch(args):
-    """Apply the selected patches (default: nolie + nologo + fastlcd + earlykey)."""
+    """Apply the selected patches (default: nolie + nologo + fastlcd).
+
+    earlykey is experimental and opt-in only (--only earlykey): hardware
+    testing showed no button improvement and spontaneous reboots during
+    heat-up, cause not yet isolated. It is never applied by default.
+    """
     if args.only:
         selected = {p for group in args.only for p in group}
     elif args.skip:
-        selected = set(PATCH_NAMES) - {p for group in args.skip for p in group}
+        selected = set(DEFAULT_PATCHES) - {p for group in args.skip for p in group}
     else:
-        selected = set(PATCH_NAMES)
+        selected = set(DEFAULT_PATCHES)
     do_nolie = "nolie" in selected
     do_nologo = "nologo" in selected
     do_fastlcd = "fastlcd" in selected
@@ -1333,6 +1342,12 @@ def find_earlykey(payload):
 
 # Patch names selectable via --only (comma-separated, in one flag).
 PATCH_NAMES = ("nolie", "nologo", "fastlcd", "earlykey")
+# Patches applied by default. earlykey is excluded: hardware testing
+# (T90B) showed no improvement in start-button response and spontaneous
+# reboots during heat-up with it applied (reboots gone without it).
+# Cause not yet isolated - earlykey stays opt-in via --only until
+# hardware-validated. Detectors still recognize already-patched images.
+DEFAULT_PATCHES = ("nolie", "nologo", "fastlcd")
 
 
 def _parse_only(value):
@@ -1383,7 +1398,8 @@ Image base: 0x08005000 (Cortex-M4F)
   nolie    remove fake temperature display compensation (BNE -> NOP)
   nologo   skip the boot logo animation (draw loop runs zero times)
   fastlcd  shorten the LCD init waits (100,100,200 ms -> 70,70,120 ms)
-  earlykey capture keypresses during boot waits (polling delay cave)
+  earlykey capture keypresses during boot waits (EXPERIMENTAL, opt-in:
+           hardware test showed no benefit + reboots; see README)
 
 every patch run also stamps the Ver Info screen (menu 16):
   N/L/F = patch present, '-' = absent (e.g. 'T90A V1.1.4NLF')""",
@@ -1395,12 +1411,13 @@ every patch run also stamps the Ver Info screen (menu 16):
         "--only", action="append", type=_parse_only, default=None,
         metavar="PATCH[,PATCH]",
         help="Apply only the selected patches, comma-separated "
-             "(default: all three)",
+             "(default: nolie,nologo,fastlcd; earlykey is opt-in)",
     )
     selector.add_argument(
         "--skip", action="append", type=_parse_only, default=None,
         metavar="PATCH[,PATCH]",
-        help="Apply all patches except the given ones, comma-separated",
+        help="Apply the default patches except the given ones, "
+             "comma-separated (earlykey is never in the default set)",
     )
 
     args = parser.parse_args()

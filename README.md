@@ -98,6 +98,22 @@ No dependencies required — Python 3 only (standard library).
 chmod +x t90_fw_tool.py
 ```
 
+## Running tests
+
+The test suite (pytest) covers the header parser, XOR crypto, version
+extraction, the three patch scanners, and end-to-end CLI runs against
+synthetic `.atk` images built from the real firmware layout, plus
+sanity checks against the real firmware archive:
+
+```bash
+pip install pytest          # dev-only dependency
+python3 -m pytest
+```
+
+Archive tests read `~/apps/atflash/firmware/` (override with
+`T90_FIRMWARE_DIR=...`) and skip automatically when the directory is
+missing. The `*_earlykey*` variants are excluded for now.
+
 ## Usage
 
 ### Info

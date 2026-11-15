@@ -1,0 +1,130 @@
+"""Sanity tests against the real firmware archive.
+
+These tests verify that the synthetic model in synthetic.py matches the
+behaviour of the tool on actual .atk files from the archive.
+
+Skipped automatically when the archive directory is missing
+(override with T90_FIRMWARE_DIR).
+
+Note: the '*_earlykey*' variants use a modified delay routine, so
+fastlcd detection reports 'unknown' on them; they are skipped for now.
+"""
+
+import glob
+import os
+
+import pytest
+
+import t90_fw_tool as tool
+from conftest import FIRMWARE_DIR
+
+pytestmark = pytest.mark.archive
+
+
+def _archive_files(pattern="*.atk"):
+    return sorted(glob.glob(os.path.join(FIRMWARE_DIR, pattern)))
+
+
+def _load(path):
+    data = open(path, "rb").read()
+    return data, tool.xor_decrypt(data[13:])
+
+
+def atk_names():
+    # earlykey variants skipped for now (fastlcd pattern unknown there).
+    return [
+        os.path.basename(p)
+        for p in _archive_files()
+        if "earlykey" not in os.path.basename(p)
+    ]
+
+
+
+
+
+@pytest.mark.parametrize("name", atk_names() or ["<empty>"])
+def test_header_parses(name):
+    data, _ = _load(os.path.join(FIRMWARE_DIR, name))
+    header = tool.parse_atk_header(data)
+    assert header["dev_type"] == 0x0208
+    assert len(data) == 13 + header["bin_size"]
+
+
+@pytest.mark.parametrize("name", atk_names() or ["<empty>"])
+def test_version_decoded_from_code_matches_filename(name):
+    path = os.path.join(FIRMWARE_DIR, name)
+    _, payload = _load(path)
+    checks = tool.find_firmware_version(payload)
+    assert checks, f"no version self-check found in {name}"
+    version_ints = {imm for _, imm in checks}
+    assert len(version_ints) == 1
+    version = tool.format_version(version_ints.pop())
+    assert version == tool.parse_version_from_filename(name)
+
+
+@pytest.mark.parametrize("name", atk_names() or ["<empty>"])
+def test_patch_status_matches_filename(name):
+    path = os.path.join(FIRMWARE_DIR, name)
+    _, payload = _load(path)
+
+    if "_nolie" in name:
+        assert tool.find_function_location(
+            payload, instruction=tool.THUMB_NOP
+        ) is not None, f"{name}: expected nolie patched"
+    else:
+        assert tool.find_function_location(
+            payload, instruction=None
+        ) is not None, f"{name}: expected stock nolie"
+
+    if "_nologo" in name:
+        assert tool.find_logo_anim_patch(payload) is not None, name
+    else:
+        assert tool.find_logo_anim(payload) is not None, name
+
+    if "_fastlcd" in name:
+        waits = tool.find_lcd_waits(payload, patched=True)
+        assert waits is not None, name
+        assert [v for _, v in waits] == list(tool.LCD_WAIT_PATCH)
+    else:
+        waits = tool.find_lcd_waits(payload, patched=False)
+        assert waits is not None, name
+        assert [v for _, v in waits] == list(tool.LCD_WAIT_ORIG)
+
+
+@pytest.mark.parametrize("name", atk_names() or ["<empty>"])
+def test_info_exits_zero(name):
+    import sys
+
+    old = sys.argv
+    try:
+        sys.argv = ["t90_fw_tool.py", "info",
+                    os.path.join(FIRMWARE_DIR, name)]
+        assert tool.main() == 0
+    finally:
+        sys.argv = old
+
+
+def test_bin_matches_decrypted_atk():
+    bin_path = os.path.join(FIRMWARE_DIR, "t90_v1.1.6.bin")
+    atk_path = os.path.join(FIRMWARE_DIR, "t90_v1.1.6.atk")
+    if not (os.path.exists(bin_path) and os.path.exists(atk_path)):
+        pytest.skip("t90_v1.1.6.bin / t90_v1.1.6.atk not in archive")
+    with open(bin_path, "rb") as f:
+        raw = f.read()
+    _, payload = _load(atk_path)
+    assert raw == payload
+
+
+def test_stock_files_are_unpatched():
+    stock = [n for n in atk_names() if n.endswith(".atk") and
+             n.replace(".atk", "").count("_") == 1]  # t90_vX.Y.Z only
+    assert stock, "no stock firmware files in archive"
+    for name in stock:
+        _, payload = _load(os.path.join(FIRMWARE_DIR, name))
+        assert tool.find_function_location(
+            payload, instruction=tool.THUMB_NOP
+        ) is None, name
+
+
+def test_archive_files_exist():
+    assert atk_names(), f"no .atk files in {FIRMWARE_DIR}"

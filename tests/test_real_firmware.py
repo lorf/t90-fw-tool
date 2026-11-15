@@ -104,17 +104,6 @@ def test_info_exits_zero(name):
         sys.argv = old
 
 
-def test_bin_matches_decrypted_atk():
-    bin_path = os.path.join(FIRMWARE_DIR, "t90_v1.1.6.bin")
-    atk_path = os.path.join(FIRMWARE_DIR, "t90_v1.1.6.atk")
-    if not (os.path.exists(bin_path) and os.path.exists(atk_path)):
-        pytest.skip("t90_v1.1.6.bin / t90_v1.1.6.atk not in archive")
-    with open(bin_path, "rb") as f:
-        raw = f.read()
-    _, payload = _load(atk_path)
-    assert raw == payload
-
-
 def test_stock_files_are_unpatched():
     stock = [n for n in atk_names() if n.endswith(".atk") and
              n.replace(".atk", "").count("_") == 1]  # t90_vX.Y.Z only

@@ -30,6 +30,12 @@ line (N=nolie, L=nologo, F=fastlcd, '-'=absent), e.g. 'T90A V1.1.4NLF';
 stock firmware keeps the vendor string. The stamp reuses padding
 bytes inside the existing string footprint, so no address moves.
 
+The "earlykey" patch captures keypresses during boot waits: all
+delay_ms() callers are redirected to a polling-delay routine in an
+empty flash cave (ARM 0x08006040) that samples the key-scan routine
+every 8th ms with unchanged timing. So a heater start press made
+during LCD init is acted on as soon as the main loop starts.
+
 Firmware version extraction: the T90 firmware contains a version
 self-check function (Thumb) that loads its own version as a
 single integer (e.g. 114 = v1.1.4) from RAM and compares it against
@@ -225,6 +231,17 @@ def cmd_info(args):
               f"(menu 16, payload offset 0x{ver_off:05X})")
     else:
         print(f"  verinfo:  unknown (Ver Info string pattern not found - "
+              f"unsupported firmware version?)")
+
+    ek, cave_off, _, keyscan_off = find_earlykey(payload)
+    if ek == "clean":
+        print(f"  earlykey: not patched (key-scan at payload offset "
+              f"0x{keyscan_off:05X}, ARM 0x{0x08005000 + keyscan_off:08X})")
+    elif ek == "patched":
+        print(f"  earlykey: already patched (polling delay at ARM "
+              f"0x{0x08005000 + cave_off:08X})")
+    else:
+        print(f"  earlykey: unknown (delay caller pattern not found - "
               f"unsupported firmware version?)")
 
     return 0
@@ -462,7 +479,7 @@ def find_function_location(payload, instruction=None):
 
 
 def cmd_patch(args):
-    """Apply the selected patches (default: nolie + nologo + fastlcd)."""
+    """Apply the selected patches (default: nolie + nologo + fastlcd + earlykey)."""
     if args.only:
         selected = {p for group in args.only for p in group}
     elif args.skip:
@@ -472,6 +489,7 @@ def cmd_patch(args):
     do_nolie = "nolie" in selected
     do_nologo = "nologo" in selected
     do_fastlcd = "fastlcd" in selected
+    do_earlykey = "earlykey" in selected
 
     with open(args.file, "rb") as f:
         data = bytearray(f.read())
@@ -497,6 +515,8 @@ def cmd_patch(args):
         already.add("nologo")
     if find_lcd_waits(payload, patched=True) is not None:
         already.add("fastlcd")
+    if find_earlykey(payload)[0] == "patched":
+        already.add("earlykey")
     effective = selected | already
 
     new_payload = bytearray(payload)
@@ -581,6 +601,39 @@ def cmd_patch(args):
             print(f"  Patched to: LCD waits {list(LCD_WAIT_PATCH)} ms "
                   f"(saves ~{sum(LCD_WAIT_ORIG) - sum(LCD_WAIT_PATCH)} ms of boot time)")
 
+    if do_earlykey:
+        # Redirect all delay_ms() callers to a polling delay in the cave:
+        # same timing, but samples the key-scan routine every 8th ms so a
+        # keypress during boot waits (LCD init included) is captured and
+        # acted on as soon as the main loop starts.
+        state, _, delay_off, keyscan_off = find_earlykey(new_payload)
+        if state == "patched":
+            print(f"Earlykey polling delay already applied (patch present).")
+        elif state != "clean":
+            print("Error: delay_ms caller pattern not found.", file=sys.stderr)
+            print("  Unsupported firmware version?", file=sys.stderr)
+            return 1
+        else:
+            callers, _ = find_delay_callers(new_payload)
+            delay_addr = 0x08005000 + delay_off
+            keyscan_addr = 0x08005000 + keyscan_off
+            cave_off = EARLYKEY_CAVE_ADDR - 0x08005000
+            cave = build_earlykey_cave(EARLYKEY_CAVE_ADDR, delay_addr,
+                                       keyscan_addr)
+            if any(b != 0 for b in new_payload[cave_off:cave_off + len(cave)]):
+                print(f"Error: cave at ARM 0x{EARLYKEY_CAVE_ADDR:08X} "
+                      f"is not empty - refusing to patch.", file=sys.stderr)
+                return 1
+            new_payload[cave_off:cave_off + len(cave)] = cave
+            for bl_off in callers:
+                new_payload[bl_off:bl_off + 4] = _bl_encode(
+                    0x08005000 + bl_off, EARLYKEY_CAVE_ADDR)
+            print(f"Key-scan routine at payload offset 0x{keyscan_off:05X} "
+                  f"(ARM 0x{keyscan_addr:08X})")
+            print(f"Polling delay installed at ARM 0x{EARLYKEY_CAVE_ADDR:08X} "
+                  f"({len(cave)} bytes); {len(callers)} delay_ms callers "
+                  f"redirected (keys sampled every 8th ms of every wait)")
+
     if effective:
         # Stamp the designation letters onto the Ver Info screen: the
         # string shrinks by one space, drops the colon and grows up to
@@ -614,7 +667,6 @@ def cmd_patch(args):
                 return 1
             print(f"Ver Info designation updated '{have}' -> '{stamped}' "
                   f"(payload offset 0x{ver_off:05X})")
-
     # Re-encrypt the payload
     encrypted_payload = xor_decrypt(bytes(new_payload))
 
@@ -623,7 +675,7 @@ def cmd_patch(args):
     output.extend(encrypted_payload)
 
     suffix = ""
-    for name in ("nolie", "nologo", "fastlcd"):
+    for name in ("nolie", "nologo", "fastlcd", "earlykey"):
         if name in effective:
             suffix += "_" + name
     if not suffix:
@@ -641,7 +693,7 @@ def cmd_patch(args):
         changed = True
         while changed:
             changed = False
-            for old in ("_nolie", "_nologo", "_fastlcd"):
+            for old in ("_nolie", "_nologo", "_fastlcd", "_earlykey"):
                 if base.endswith(old):
                     base = base[:-len(old)]
                     changed = True
@@ -954,6 +1006,11 @@ def find_ms_delay(payload):
                     if 0 <= doff < len(payload) - len(MS_DELAY_HEAD) \
                             and raw[doff:doff + len(MS_DELAY_HEAD)] == MS_DELAY_HEAD:
                         return doff
+                    # Maybe redirected through an earlykey polling-delay
+                    # cave: resolve its inner BL to the real delay_ms.
+                    inner_off, _ = _validate_cave(payload, target)
+                    if inner_off is not None:
+                        return inner_off
         start = idx + 1
 
 
@@ -973,15 +1030,16 @@ def find_lcd_waits(payload, patched=False):
     delay_addr = 0x08005000 + delay_off
     want = LCD_WAIT_PATCH if patched else LCD_WAIT_ORIG
 
-    # Collect every (bl_addr, imm) calling delay_ms via `movs r0, #imm`.
+    # Collect every (bl_addr, imm) calling delay_ms via `movs r0, #imm`
+    # (directly, or through an earlykey polling-delay cave).
     callers = []
-    for off in range(0, len(payload) - 2, 2):
+    for off in range(2, len(payload) - 2, 2):
         if (struct.unpack_from("<H", payload, off)[0] >> 11) != 0b11110:
             continue
         h2 = struct.unpack_from("<H", payload, off + 2)[0]
         if (h2 & 0xF000) != 0xF000 or not (h2 & 0x1000):
             continue
-        if _bl_target(payload, 0x08005000 + off) != delay_addr:
+        if not _is_delay_caller(payload, off, delay_addr):
             continue
         h = struct.unpack_from("<H", payload, off - 2)[0]
         imm = h & 0xFF if (h & 0xFF00) == 0x2000 else None
@@ -1018,8 +1076,263 @@ def find_lcd_waits(payload, patched=False):
     return [(sites_ab[0], want[0]), (sites_ab[1], want[1]), (site_c, want[2])]
 
 
+def _bl_encode(src_addr, tgt_addr):
+    """Encode a 32-bit Thumb BL from src_addr to tgt_addr (4 bytes)."""
+    off = tgt_addr - src_addr - 4
+    if not (-(1 << 23) <= off < (1 << 23)) or off % 2:
+        raise ValueError(f"BL target out of range: {tgt_addr:#x} from {src_addr:#x}")
+    s = (off >> 24) & 1
+    i1 = (off >> 23) & 1
+    i2 = (off >> 22) & 1
+    j1 = 1 ^ (i1 ^ s)
+    j2 = 1 ^ (i2 ^ s)
+    h1 = (0b11110 << 11) | (s << 10) | ((off >> 12) & 0x3FF)
+    h2 = (0b11111 << 11) | (j1 << 13) | (1 << 12) | (j2 << 11) | ((off >> 1) & 0x7FF)
+    return struct.pack("<HH", h1, h2)
+
+
+# Key-scan routine locator: the function containing `mov.w r1, #0x8000`
+# (4FF40041, unique image-wide in v1.1.4/v1.1.5/v1.1.6). It polls the two
+# key/encoder pins (GPIOA-15, GPIOC-4) and raises the key flag consumed by
+# the heater control logic. Entry = the PUSH right before the anchor.
+KEYSCAN_ANCHOR = bytes([0x4F, 0xF4, 0x00, 0x41])  # mov.w r1, #0x8000
+KEYSCAN_PROBE = bytes([0x10, 0x21])              # movs r1, #0x10 (same func)
+
+# Cave for the earlykey polling delay: 296 zero bytes at ARM 0x08006040
+# (payload 0x1040) in all three firmware versions. Verified empty, no xrefs.
+EARLYKEY_CAVE_ADDR = 0x08006040
+RCC_APB2ENR = 0x40021018
+EARLYKEY_POLL_DIV = 8  # poll keys every 8th ms slice
+
+
+def find_keyscan(payload):
+    """Find the payload offset of the key-scan routine, or None.
+
+    Anchor: unique `mov.w r1, #0x8000`; entry is the PUSH just before it.
+    The candidate is accepted only if `movs r1, #0x10` follows within the
+    same function (the second key pin mask).
+    """
+    raw = bytes(payload)
+    idx = raw.find(KEYSCAN_ANCHOR)
+    if idx < 0 or raw.find(KEYSCAN_ANCHOR, idx + 1) >= 0:
+        return None  # missing or ambiguous - refuse to patch
+    # Walk back to the function entry PUSH (0xB5xx), at most 16 bytes.
+    entry = None
+    for back in range(2, 18, 2):
+        h = struct.unpack_from("<H", payload, idx - back)[0]
+        if (h & 0xFF00) == 0xB500:
+            entry = idx - back
+            break
+        if (h & 0xFF00) not in (0x2000, 0x2100, 0x2200, 0x2300, 0x2400,
+                                0x2500, 0x2600, 0x2700, 0x4600):
+            return None  # unexpected prologue shape - refuse
+    if entry is None:
+        return None
+    if KEYSCAN_PROBE not in raw[entry:entry + 0x120]:
+        return None
+    return entry
+
+
+def _validate_cave(payload, cave_addr):
+    """Check for a valid earlykey polling-delay cave at cave_addr.
+
+    Returns (delay_off, keyscan_off), or (None, None) if the bytes do
+    not decode as a cave built by build_earlykey_cave.
+    """
+    keyscan_off = find_keyscan(payload)
+    if keyscan_off is None:
+        return None, None
+    if not (0x08005000 + 64 <= cave_addr < 0x08005000 + len(payload) - 64):
+        return None, None
+    # First BL of the cave sits at slot 11 (see build_earlykey_cave).
+    inner = _bl_target(payload, cave_addr + 22)
+    if inner is None:
+        return None, None
+    delay_off = inner - 0x08005000
+    raw = bytes(payload)
+    if not (0 <= delay_off < len(payload) - len(MS_DELAY_HEAD)):
+        return None, None
+    if raw[delay_off:delay_off + len(MS_DELAY_HEAD)] != MS_DELAY_HEAD:
+        return None, None
+    try:
+        expect = build_earlykey_cave(cave_addr, inner,
+                                     0x08005000 + keyscan_off)
+    except ValueError:
+        return None, None
+    cave_off = cave_addr - 0x08005000
+    if not (0 <= cave_off < len(payload) - len(expect)):
+        return None, None
+    if raw[cave_off:cave_off + len(expect)] != expect:
+        return None, None
+    return delay_off, keyscan_off
+
+
+def _is_delay_caller(payload, bl_off, delay_addr):
+    """True if the BL at bl_off waits via delay_ms (directly or via cave)."""
+    t = _bl_target(payload, 0x08005000 + bl_off)
+    if t == delay_addr:
+        return True
+    if t is None:
+        return False
+    inner_off, _ = _validate_cave(payload, t)
+    return inner_off is not None and 0x08005000 + inner_off == delay_addr
+
+
+def find_delay_callers(payload):
+    """Find all BL sites calling delay_ms(). Returns ([bl_offsets], delay_off)."""
+    delay_off = find_ms_delay(payload)
+    if delay_off is None:
+        return None, None
+    delay_addr = 0x08005000 + delay_off
+    keyscan_off = find_keyscan(payload)
+    keyscan_addr = 0x08005000 + keyscan_off if keyscan_off is not None else None
+    callers = []
+    for off in range(0, len(payload) - 4, 2):
+        if (struct.unpack_from("<H", payload, off)[0] >> 11) != 0b11110:
+            continue
+        h2 = struct.unpack_from("<H", payload, off + 2)[0]
+        if (h2 & 0xF000) != 0xF000 or not (h2 & 0x1000):
+            continue
+        if _is_delay_caller(payload, off, delay_addr):
+            callers.append(off)
+    # Drop the cave's own inner BLs: they sit inside a validated cave and
+    # are part of the patch, not original delay_ms call sites.
+    spans = []
+    for t in {_bl_target(payload, 0x08005000 + o) for o in callers}:
+        if t is None:
+            continue
+        inner_off, ks_off = _validate_cave(payload, t)
+        if inner_off is not None:
+            ln = len(build_earlykey_cave(t, 0x08005000 + inner_off,
+                                        0x08005000 + ks_off))
+            spans.append((t - 0x08005000, t - 0x08005000 + ln))
+    callers = [o for o in callers
+               if not any(s <= o < e for s, e in spans)]
+    return callers, delay_off
+
+
+def build_earlykey_cave(cave_addr, delay_addr, keyscan_addr):
+    """Build the polling-delay routine placed at cave_addr.
+
+    Same ABI as delay_ms(n): waits n ms in 1 ms slices (via the original
+    delay_ms), enables the GPIO port clocks idempotently, and polls the
+    key-scan routine every EARLYKEY_POLL_DIV slices so a keypress during
+    any boot wait (LCD init included) is captured for the control loop.
+    Clobbers r0-r3 only (like any BL callee); preserves r4-r5.
+    """
+    # Item list: ("h", halfword) | ("bl", target) | ("br", cond, label).
+    # Labels mark halfword-slot positions resolved at emit time.
+    items = [
+        ("h", 0xB530),          # push {r4,r5,lr}
+        ("h", 0x4B00),          # ldr r3, [pc, #lit] (imm patched below)
+        ("h", 0x681A),          # ldr r2, [r3]
+        ("h", 0x2114),          # movs r1, #0x14 (IOPA|IOPC)
+        ("h", 0x430A),          # orrs r2, r1
+        ("h", 0x601A),          # str r2, [r3]
+        ("h", 0x4604),          # mov r4, r0
+        ("h", 0x2500),          # movs r5, #0
+        ("h", 0x2C00),          # cmp r4, #0
+        ("br", 0xD000, "done"),  # beq done
+        ("label", "loop"),
+        ("h", 0x2001),          # movs r0, #1
+        ("bl", delay_addr),     # bl delay_ms
+        ("h", 0x3501),          # adds r5, #1
+        ("h", 0x2D08),          # cmp r5, #8
+        ("br", 0xDB00, "skip"),  # blt skip
+        ("h", 0x2500),          # movs r5, #0
+        ("bl", keyscan_addr),   # bl keyscan
+        ("label", "skip"),
+        ("h", 0x3C01),          # subs r4, #1
+        ("br", 0xD100, "loop"),  # bne loop
+        ("label", "done"),
+        ("h", 0xBD30),          # pop {r4,r5,pc}
+    ]
+    # Assign halfword slots (a "bl" takes two).
+    labels = {}
+    slot_of_item = []
+    slot = 0
+    for it in items:
+        if it[0] == "label":
+            labels[it[1]] = slot
+            slot_of_item.append(None)
+        elif it[0] == "bl":
+            slot_of_item.append(slot)
+            slot += 2
+        else:
+            slot_of_item.append(slot)
+            slot += 1
+    nslots = slot
+    lit_slot = nslots + (1 if (cave_addr + nslots * 2) % 4 else 0)
+    code_addr = lambda s: cave_addr + s * 2  # slot -> ARM addr
+
+    def br8(insn_addr, target_addr):
+        rel = target_addr - (insn_addr + 4)
+        if rel % 2 or not (-256 <= rel < 256):
+            raise ValueError("branch out of range")
+        return rel // 2 & 0xFF
+
+    blob = bytearray()
+    for it, sl in zip(items, slot_of_item):
+        if it[0] == "label":
+            continue
+        if it[0] == "bl":
+            blob += _bl_encode(code_addr(sl), it[1])
+        elif it[0] == "br":
+            blob += struct.pack("<H", it[1] | br8(code_addr(sl),
+                                                  code_addr(labels[it[2]])))
+        else:  # ("h", halfword); patch the LDR literal imm (slot 1)
+            h = it[1]
+            if sl == 1:
+                aligned = (code_addr(1) + 4) // 4 * 4  # Align(PC, 4), round down
+                lit_addr = cave_addr + lit_slot * 2
+                if (lit_addr - aligned) % 4:
+                    raise ValueError("literal misaligned")
+                lit_imm = (lit_addr - aligned) // 4
+                if not (0 <= lit_imm < 256):
+                    raise ValueError("literal out of range")
+                h |= lit_imm
+            blob += struct.pack("<H", h)
+    while len(blob) < lit_slot * 2:
+        blob += struct.pack("<H", 0xBF00)  # NOP pad
+    blob += struct.pack("<I", RCC_APB2ENR)
+    assert len(blob) == lit_slot * 2 + 4
+    return bytes(blob)
+
+
+def find_earlykey(payload):
+    """Check the earlykey patch state.
+
+    Returns (state, cave_off, delay_off, keyscan_off) where state is one of:
+      'clean'   - all delay_ms callers intact (patch not applied)
+      'patched' - all callers target a valid polling-delay cave
+      None      - pattern not recognized (unsupported firmware / mixed state)
+    """
+    callers, delay_off = find_delay_callers(payload)
+    if not callers:
+        return None, None, None, None
+    keyscan_off = find_keyscan(payload)
+    if keyscan_off is None:
+        return None, None, None, None
+    delay_addr = 0x08005000 + delay_off
+    keyscan_addr = 0x08005000 + keyscan_off
+    targets = {_bl_target(payload, 0x08005000 + o) for o in callers}
+    if len(targets) == 1 and next(iter(targets)) == delay_addr:
+        return "clean", None, delay_off, keyscan_off
+    if len(targets) == 1:
+        cave_addr = next(iter(targets))
+        cave_off = cave_addr - 0x08005000
+        if 0 <= cave_off < len(payload) - 64:
+            expect = build_earlykey_cave(cave_addr, delay_addr, keyscan_addr)
+            if bytes(payload[cave_off:cave_off + len(expect)]) == expect:
+                # All call sites must point at this exact cave.
+                if all(_bl_target(payload, 0x08005000 + o) == cave_addr
+                       for o in callers):
+                    return "patched", cave_off, delay_off, keyscan_off
+    return None, None, None, None
+
+
 # Patch names selectable via --only (comma-separated, in one flag).
-PATCH_NAMES = ("nolie", "nologo", "fastlcd")
+PATCH_NAMES = ("nolie", "nologo", "fastlcd", "earlykey")
 
 
 def _parse_only(value):
@@ -1070,6 +1383,7 @@ Image base: 0x08005000 (Cortex-M4F)
   nolie    remove fake temperature display compensation (BNE -> NOP)
   nologo   skip the boot logo animation (draw loop runs zero times)
   fastlcd  shorten the LCD init waits (100,100,200 ms -> 70,70,120 ms)
+  earlykey capture keypresses during boot waits (polling delay cave)
 
 every patch run also stamps the Ver Info screen (menu 16):
   N/L/F = patch present, '-' = absent (e.g. 'T90A V1.1.4NLF')""",

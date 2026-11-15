@@ -1,6 +1,7 @@
 """End-to-end tests for the CLI: info / extract / patch."""
 
 import argparse
+import os
 import struct
 
 import pytest
@@ -124,10 +125,9 @@ def test_extract_explicit_output(atk_file, tmp_path, cli):
     out_file = str(tmp_path / "out.bin")
     code, out, err = cli("extract", path, out_file)
     assert code == 0
-    # Explicit output names still get the version appended.
-    versioned = tmp_path / "out_v1.1.6.bin"
-    assert versioned.exists()
-    assert read(versioned) == payload_of(read(path))
+    # A user-supplied output name is used verbatim.
+    assert os.path.exists(out_file)
+    assert read(out_file) == payload_of(read(path))
 
 
 def test_extract_default_output_is_versioned(atk_file, tmp_path, cli):
@@ -331,10 +331,9 @@ def test_patch_explicit_output(atk_file, tmp_path, cli):
     out_file = str(tmp_path / "custom.atk")
     code, out, err = cli("patch", path, out_file)
     assert code == 0, err
-    # Explicit output names still get the version appended.
-    versioned = tmp_path / "custom_v1.1.6.atk"
-    assert versioned.exists()
-    assert read(versioned)[13:] != read(path)[13:]
+    # A user-supplied output name is used verbatim.
+    assert os.path.exists(out_file)
+    assert read(out_file)[13:] != read(path)[13:]
 
 
 def test_patch_bad_header(atk_file, cli):

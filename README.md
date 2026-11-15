@@ -199,11 +199,13 @@ LCD wait at payload offset 0x04B7C (ARM 0x08009B7C): movs r0, #100 -> movs r0, #
 LCD wait at payload offset 0x050BC (ARM 0x0800A0BC): movs r0, #200 -> movs r0, #120
   Patched to: LCD waits [70, 70, 120] ms (saves ~140 ms of boot time)
 
-Patched firmware written to: t90_v1.1.4_nolie_nologo_fastlcd.atk
+Patched firmware written to: t90_nolie_nologo_fastlcd.atk
   Original size: 104461 bytes
   Output size:   104461 bytes
   Firmware version: 1.1.4
 ```
+
+An explicit output name is used verbatim — no version or patch suffix is added to it.
 
 Without explicit output:
 ```bash

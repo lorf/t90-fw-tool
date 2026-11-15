@@ -231,7 +231,8 @@ def cmd_extract(args):
     # Determine firmware version (used when naming the output file)
     version = determine_firmware_version(payload, args.file)
 
-    # Determine output file name
+    # Determine output file name. A user-supplied name is used verbatim;
+    # only auto-generated names get the firmware version inserted.
     if args.output:
         output_file = args.output
     else:
@@ -239,9 +240,7 @@ def cmd_extract(args):
             output_file = args.file[:-4] + ".bin"
         else:
             output_file = args.file + ".bin"
-
-    # Add the firmware version to the name if it's not already there
-    output_file = make_versioned_filename(output_file, version)
+        output_file = make_versioned_filename(output_file, version)
 
     with open(output_file, "wb") as f:
         f.write(payload)
@@ -598,9 +597,7 @@ def cmd_patch(args):
                     changed = True
         # Version goes before the suffixes: t90_v1.1.4_nolie_nologo.atk
         output_file = make_versioned_filename(base, version) + suffix + ext
-
-    # Add the firmware version to the name if it's not already there
-    output_file = make_versioned_filename(output_file, version)
+    # else: a user-supplied name is written verbatim (no version inserted)
 
     with open(output_file, "wb") as f:
         f.write(output)

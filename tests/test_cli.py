@@ -36,6 +36,13 @@ LOGO_BYTES = set(range(synthetic.LOGO_OFFSET, synthetic.LOGO_OFFSET + 4))
 FASTLCD_BYTES = {
     synthetic.WAIT_A_OFFSET, synthetic.WAIT_B_OFFSET, synthetic.WAIT_C_OFFSET
 }
+# Ver Info designation: stock 'T90%s  V:%1d.%1d.%1d' (20 chars) ->
+# stamped 'T90%s V%1d.%1d.%1d<letters>' (21 chars). Bytes 0..5 are
+# identical, then the collapsed space, dropped colon, shifted tail and
+# 3 letters differ (rel 6..20); the relocated NUL lands on old zero
+# padding, and the pool word after the window is untouched.
+VER_BYTES = set(range(synthetic.VER_INFO_OFFSET + 6,
+                      synthetic.VER_INFO_OFFSET + 21))
 
 
 # --- info ------------------------------------------------------------------
@@ -177,7 +184,7 @@ def test_patch_all(atk_file, tmp_path, cli):
     orig_p = payload_of(original)
     new_p = payload_of(patched)
     diffs = set(payload_diff_offsets(orig_p, new_p))
-    expected = NOLIE_BYTES | LOGO_BYTES | FASTLCD_BYTES
+    expected = NOLIE_BYTES | LOGO_BYTES | FASTLCD_BYTES | VER_BYTES
     assert diffs == expected, (sorted(diffs), sorted(expected))
 
     # Spot-check the written instructions.
@@ -200,6 +207,7 @@ def test_patch_all(atk_file, tmp_path, cli):
     assert "nologo:   already patched" in out2
     assert "fastlcd:  already patched" in out2
     assert "version:   1.1.6" in out2
+    assert "verinfo:  'NLF'" in out2
 
     # Patched output is valid XOR of the payload (re-encrypt sanity).
     assert tool.xor_decrypt(patched[13:]) == new_p
@@ -224,7 +232,7 @@ def test_patch_only_nolie(atk_file, tmp_path, cli):
     assert out_path.exists()
     diffs = set(payload_diff_offsets(payload_of(read(path)),
                                      payload_of(read(out_path))))
-    assert diffs == NOLIE_BYTES
+    assert diffs == NOLIE_BYTES | VER_BYTES
 
 
 def test_patch_only_comma_list(atk_file, tmp_path, cli):
@@ -235,7 +243,7 @@ def test_patch_only_comma_list(atk_file, tmp_path, cli):
     assert out_path.exists()
     diffs = set(payload_diff_offsets(payload_of(read(path)),
                                      payload_of(read(out_path))))
-    assert diffs == NOLIE_BYTES | FASTLCD_BYTES
+    assert diffs == NOLIE_BYTES | FASTLCD_BYTES | VER_BYTES
 
 
 def test_patch_only_fastlcd(atk_file, tmp_path, cli):
@@ -246,7 +254,7 @@ def test_patch_only_fastlcd(atk_file, tmp_path, cli):
     assert out_path.exists()
     diffs = set(payload_diff_offsets(payload_of(read(path)),
                                      payload_of(read(out_path))))
-    assert diffs == FASTLCD_BYTES
+    assert diffs == FASTLCD_BYTES | VER_BYTES
 
 
 def test_patch_skip_fastlcd(atk_file, tmp_path, cli):
@@ -257,7 +265,7 @@ def test_patch_skip_fastlcd(atk_file, tmp_path, cli):
     assert out_path.exists()
     diffs = set(payload_diff_offsets(payload_of(read(path)),
                                      payload_of(read(out_path))))
-    assert diffs == NOLIE_BYTES | LOGO_BYTES
+    assert diffs == NOLIE_BYTES | LOGO_BYTES | VER_BYTES
 
 
 def test_patch_skip_all_errors(atk_file, cli):
@@ -315,7 +323,10 @@ def test_patch_patched_input_no_suffix_stacking(atk_file, tmp_path, cli):
 def test_patch_partial_input_keeps_existing_patch_in_name(
     atk_file, tmp_path, cli
 ):
-    path = atk_file(payload=synthetic.build_payload(nolie="patched"))
+    # A file patched by an older tool (no Ver Info stamp yet) gains the
+    # remaining patches plus the stamp for the full effective set.
+    path = atk_file(payload=synthetic.build_payload(nolie="patched",
+                                                    verinfo="stock"))
     code, out, err = cli("patch", path)  # applies nologo + fastlcd
     assert code == 0, err
     out_path = tmp_path / "t90_v1.1.6_nolie_nologo_fastlcd.atk"
@@ -323,7 +334,7 @@ def test_patch_partial_input_keeps_existing_patch_in_name(
     # Only nologo + fastlcd bytes changed vs the input.
     diffs = set(payload_diff_offsets(payload_of(read(path)),
                                      payload_of(read(out_path))))
-    assert diffs == LOGO_BYTES | FASTLCD_BYTES
+    assert diffs == LOGO_BYTES | FASTLCD_BYTES | VER_BYTES
 
 
 def test_patch_explicit_output(atk_file, tmp_path, cli):

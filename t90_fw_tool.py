@@ -24,6 +24,12 @@ at boot. The trimmed values stay within the MIPI DCS minimums
 patches it alters hardware timing, so use --only to skip it if the
 panel ever fails to initialize on cold boot.
 
+Menu item 16 "Ver Info" shows the model variant and firmware version.
+Any patch run also stamps a one-letter-per-patch designation onto that
+line (N=nolie, L=nologo, F=fastlcd, '-'=absent), e.g. 'T90A V1.1.4NLF';
+stock firmware keeps the vendor string. The stamp reuses padding
+bytes inside the existing string footprint, so no address moves.
+
 Firmware version extraction: the T90 firmware contains a version
 self-check function (Thumb) that loads its own version as a
 single integer (e.g. 114 = v1.1.4) from RAM and compares it against
@@ -209,6 +215,16 @@ def cmd_info(args):
         print(f"  fastlcd:  already patched (LCD waits: {vals})")
     else:
         print(f"  fastlcd:  unknown (LCD init wait pattern not found - "
+              f"unsupported firmware version?)")
+
+    ver_off = find_ver_info(payload)
+    if ver_off is not None:
+        letters = ver_info_letters(payload, ver_off)
+        shown = letters if letters is not None else "(none)"
+        print(f"  verinfo:  '{shown}' on the Ver Info screen "
+              f"(menu 16, payload offset 0x{ver_off:05X})")
+    else:
+        print(f"  verinfo:  unknown (Ver Info string pattern not found - "
               f"unsupported firmware version?)")
 
     return 0
@@ -565,6 +581,40 @@ def cmd_patch(args):
             print(f"  Patched to: LCD waits {list(LCD_WAIT_PATCH)} ms "
                   f"(saves ~{sum(LCD_WAIT_ORIG) - sum(LCD_WAIT_PATCH)} ms of boot time)")
 
+    if effective:
+        # Stamp the designation letters onto the Ver Info screen: the
+        # string shrinks by one space, drops the colon and grows up to
+        # 3 letters, all inside the existing footprint.  A stamp from an
+        # earlier (subset) run is normalized via the stock spelling, so
+        # incremental patching just works.  Fail closed on any mismatch.
+        ver_off = find_ver_info(new_payload)
+        if ver_off is None:
+            print("Error: Ver Info string pattern not found.", file=sys.stderr)
+            print("  Unsupported firmware version?", file=sys.stderr)
+            return 1
+        present = {
+            name: ("patched" if name in effective else "stock")
+            for name, _ in VER_INFO_LETTERS
+        }
+        letters = ver_info_expected_letters(**present)
+        have = ver_info_letters(new_payload, ver_off)
+        if have is None:
+            stamped = stamp_ver_info(new_payload, ver_off, letters)
+            print(f"Ver Info designation at payload offset 0x{ver_off:05X} "
+                  f"(ARM 0x{0x08005000 + ver_off:08X}): '{stamped}'")
+        elif have == letters:
+            print(f"Ver Info designation already stamped ('{have}').")
+        else:
+            try:
+                unstamp_ver_info(new_payload, ver_off)
+                stamped = stamp_ver_info(new_payload, ver_off, letters)
+            except ValueError as e:
+                print(f"Error: cannot re-stamp Ver Info string: {e}.",
+                      file=sys.stderr)
+                return 1
+            print(f"Ver Info designation updated '{have}' -> '{stamped}' "
+                  f"(payload offset 0x{ver_off:05X})")
+
     # Re-encrypt the payload
     encrypted_payload = xor_decrypt(bytes(new_payload))
 
@@ -609,6 +659,22 @@ def cmd_patch(args):
         print(f"  Firmware version: {version}")
 
     return 0
+
+
+# Ver Info screen designation (menu item 16, "T90%s  V:%1d.%1d.%1d").
+# The string lives in a literal-pool gap: the NUL is followed by up to
+# 4 zero bytes before the next pool word, so the stamp extends into
+# that padding without moving any address (the single ADR reference is
+# PC-relative to the string start).
+# Stock spelling keeps the vendor's double space and colon; any patch
+# presence collapses the space and drops the colon, then appends one
+# letter per patch, so the padded areas encode the designation:
+# N/L/F = present, - = absent.
+VER_INFO_STOCK = "T90%s V%1d.%1d.%1d"
+VER_INFO_STOCK_RAW = b"T90%s  V:%1d.%1d.%1d\x00"
+VER_INFO_LETTERS = (("nolie", "N"), ("nologo", "L"), ("fastlcd", "F"))
+VER_INFO_MAX_LEN = 24  # string + NUL + the 4 free padding bytes
+VER_INFO_ADR_RD = 1  # fmt pointer is loaded into r1 (adr r1, #imm)
 
 
 # Boot logo animation: the logo task draws the 160x40 logo in a loop
@@ -692,6 +758,137 @@ def find_logo_anim_patch(payload):
         if results is not None and all(ok for _, _, _, ok in results):
             return idx
         start = idx + 1
+
+
+def find_ver_info(payload):
+    """Find the Ver Info format string (stock or stamped + letters).
+
+    Locates every candidate of the right shape and keeps only those with
+    exactly one PC-relative ADR reference loading the string start, as
+    observed on all real firmware versions.  Returns the payload offset
+    of the string start, or None.
+    """
+    raw = bytes(payload)
+    cands = []
+    start = 0
+    while True:
+        idx = raw.find(b"T90", start)
+        if idx < 0:
+            break
+        tail = raw[idx:idx + VER_INFO_MAX_LEN + 8]
+        m = re.match(rb"T90%s {1,2}V:?%1d\.%1d\.%1d([-NLF]{3})?\x00", tail)
+        if m:
+            end = idx + m.end()  # just past the NUL
+            # Padded dots up to the next pool word must be zeros, and the
+            # word itself nonzero (stock: exactly 4 free bytes).
+            pad = end
+            while pad < len(raw) and raw[pad] == 0 and pad - end < 4:
+                pad += 1
+            if pad - end <= 4 and pad + 4 <= len(raw) \
+                    and int.from_bytes(raw[pad:pad + 4], "little") != 0:
+                cands.append((idx, m.group(1).decode() if m.group(1) else None))
+        start = idx + 1
+
+    good = [c for c in cands if _ver_info_refs(payload, c[0]) == 1]
+    if len(good) != 1 or len(cands) != 1:
+        return None
+    return good[0][0]
+
+
+def _ver_info_refs(payload, string_off):
+    """Count halfword-aligned instructions referencing a string address.
+
+    Matches ADR (PC-relative to the string start) and LDR-literal words
+    holding the string address, mirroring how the format-string pointer
+    reaches the snprintf call.
+    """
+    refs = 0
+    addr = 0x08005000 + string_off
+    n = len(payload)
+    for off in range(0, n - 1, 2):
+        hw = struct.unpack_from("<H", payload, off)[0]
+        # ADR Rd, #imm8<<2: target = (Align(PC,4)) + imm.
+        if (hw & 0xF800) == 0xA000 and (hw >> 8) & 0x7 == VER_INFO_ADR_RD:
+            if ((off + 0x08005000 + 4) & ~3) + (hw & 0xFF) * 4 == addr:
+                refs += 1
+        # LDR-literal Rd, [PC, #imm8<<2] dereferencing a pool word == addr.
+        elif (hw & 0xF800) == 0x4800:
+            lit = ((off + 0x08005000 + 4) & ~3) + (hw & 0xFF) * 4
+            loff = lit - 0x08005000
+            if 0 <= loff + 4 <= n and \
+                    struct.unpack_from("<I", payload, loff)[0] == addr:
+                refs += 1
+    return refs
+
+
+def ver_info_letters(payload, string_off=None):
+    """Read the designation letters stamped on the Ver Info string.
+
+    Returns e.g. 'NLF' (patched) / '---' (all absent) / None when the
+    string is missing or held no stamp.
+    """
+    if string_off is None:
+        string_off = find_ver_info(payload)
+    if string_off is None:
+        return None
+    tail = bytes(payload[string_off:string_off + VER_INFO_MAX_LEN + 8])
+    m = re.match(rb"T90%s {1,2}V:?%1d\.%1d\.%1d([-NLF]{3})?\x00", tail)
+    if not m or not m.group(1):
+        return None
+    return m.group(1).decode()
+
+
+def unstamp_ver_info(payload, string_off=None):
+    """Restore the vendor spelling of a stamped Ver Info string.
+
+    Rewrites 'T90%s␣V…<letters>' back to 'T90%s␣␣V:…' in place; the
+    leftover byte past the stock NUL is already zero (old NUL), so the
+    result is byte-identical to the vendor string.  Raises ValueError
+    when the string holds no stamp.
+    """
+    if string_off is None:
+        string_off = find_ver_info(payload)
+        if string_off is None:
+            raise ValueError("Ver Info string pattern not found")
+    tail = bytes(payload[string_off:string_off + VER_INFO_MAX_LEN + 8])
+    m = re.match(rb"T90%s {1,2}V:?%1d\.%1d\.%1d([-NLF]{3})\x00", tail)
+    if not m or not m.group(1):
+        raise ValueError(f"Ver Info string holds no stamp: {tail[:24]!r}")
+    payload[string_off:string_off + len(VER_INFO_STOCK_RAW)] = \
+        VER_INFO_STOCK_RAW
+    return VER_INFO_STOCK_RAW[:-1].decode()
+
+
+def ver_info_expected_letters(nolie, nologo, fastlcd):
+    """Designation letters for a patch set ('-' = patch absent)."""
+    letters = dict(VER_INFO_LETTERS)
+    return "".join(
+        letters[patch] if state == "patched" else "-"
+        for patch, state in (
+            ("nolie", nolie), ("nologo", nologo), ("fastlcd", fastlcd)
+        )
+    )
+
+
+def stamp_ver_info(payload, string_off, letters):
+    """Stamp the designation letters onto the Ver Info string in place.
+
+    Rewrites 'T90%s␣␣V:…' to 'T90%s␣V…<letters>' inside the existing
+    footprint (extends at most into the 4 free padding bytes).  The
+    string start never moves, so the ADR reference needs no fixup.
+    Returns the stamped string (without NUL).
+    """
+    old = VER_INFO_STOCK_RAW
+    seg = bytes(payload[string_off:string_off + len(old)])
+    if seg != old:
+        raise ValueError(
+            "already stamped or unexpected Ver Info string: "
+            f"{seg!r} (expected stock {old!r})"
+        )
+    stamped = (VER_INFO_STOCK + letters).encode("ascii") + b"\x00"
+    assert len(stamped) <= VER_INFO_MAX_LEN, stamped
+    payload[string_off:string_off + len(stamped)] = stamped
+    return stamped[:-1].decode()
 
 
 # Millisecond busy-wait used all over the firmware (LCD init, beep, task
@@ -872,7 +1069,10 @@ Image base: 0x08005000 (Cortex-M4F)
         epilog="""patches:
   nolie    remove fake temperature display compensation (BNE -> NOP)
   nologo   skip the boot logo animation (draw loop runs zero times)
-  fastlcd  shorten the LCD init waits (100,100,200 ms -> 70,70,120 ms)""",
+  fastlcd  shorten the LCD init waits (100,100,200 ms -> 70,70,120 ms)
+
+every patch run also stamps the Ver Info screen (menu 16):
+  N/L/F = patch present, '-' = absent (e.g. 'T90A V1.1.4NLF')""",
     )
     parser_patch.add_argument("file", help="Input .atk firmware file")
     parser_patch.add_argument("output", nargs="?", help="Output .atk file (optional)")

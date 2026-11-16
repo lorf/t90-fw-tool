@@ -117,3 +117,26 @@ def test_stock_files_are_unpatched():
 
 def test_archive_files_exist():
     assert atk_names(), f"no .atk files in {FIRMWARE_DIR}"
+
+
+@pytest.mark.parametrize("name", atk_names() or ["<empty>"])
+def test_ver_info_anchor_stable(name):
+    # The Ver Info format string sits at a version-dependent offset with
+    # exactly one ADR reference.  Files predate stamping (letters None)
+    # unless already patched with this tool, in which case the letters
+    # must match the patch set in the file name.
+    _, payload = _load(os.path.join(FIRMWARE_DIR, name))
+    if "_v1.1.4" in name:
+        expected_off = 0x10DC8
+    elif "_v1.1.5" in name:
+        expected_off = 0x10DE0
+    else:
+        expected_off = 0x11814
+    off = tool.find_ver_info(payload)
+    assert off == expected_off, name
+    letters = tool.ver_info_letters(payload, off)
+    expected = "".join(
+        letter if f"_{patch}" in name else "-"
+        for patch, letter in tool.VER_INFO_LETTERS
+    )
+    assert letters in (None, expected), (name, letters)

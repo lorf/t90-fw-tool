@@ -69,8 +69,40 @@ WAIT_C_OFFSET = 0x0466     # movs r0, #200   (SLPOUT -> DISPON, site C)
 # anchor, so the cluster is packed tight (14 bytes total).
 DISPON_OFFSET = 0x046C     # movs r0, #0x29
 
+# --- Ver Info screen designation -----------------------------------------
+# Format string of menu item 16 "Ver Info" in the real firmware:
+#     b'T90%s  V:%1d.%1d.%1d'  (20 chars + NUL, free padding before the
+#     next pool word, referenced by exactly one PC-relative ADR).
+VER_INFO_OFFSET = 0x1200  # payload offset of the format string
+VER_INFO_ADR_DELTA = 0x80  # adr -> string delta, as on real firmware
+# Stamped shape: single space, no colon, then the letters.
+VER_INFO_STOCK = "T90%s V%1d.%1d.%1d"
+VER_INFO_STAMP_OFFSET = VER_INFO_OFFSET + len(VER_INFO_STOCK.encode())
+# Vendor spelling on real firmware (double space + colon).
+VER_INFO_VENDOR = "T90%s  V:%1d.%1d.%1d"
+VER_INFO_LETTERS = (("nolie", "N"), ("nologo", "L"), ("fastlcd", "F"))
+VER_INFO_STATES = ("stock", "patched")
+
 # --- decoys (must never be matched) --------------------------------------
 DECOY_LOGO_OFFSET = 0x1000  # stray 6F F0 26 04 with wrong neighbours
+
+
+def ver_info_stamped(nolie="stock", nologo="stock", fastlcd="stock"):
+    """Ver Info format string with the designation letters for a patch set.
+
+    Returns the full ASCII string (no NUL), e.g. 'T90%s V%1d.%1d.%1dNLF'.
+    '-' marks a patch that is not present.  Raises KeyError on an
+    unknown patch state (guards against builder/tool skew).
+    """
+    states = {"nolie": nolie, "nologo": nologo, "fastlcd": fastlcd}
+    unknown = [s for s in states.values() if s not in VER_INFO_STATES]
+    if unknown:
+        raise KeyError(f"unknown patch state: {unknown[0]!r}")
+    letters = "".join(
+        letter if states[patch] == "patched" else "-"
+        for patch, letter in VER_INFO_LETTERS
+    )
+    return VER_INFO_STOCK + letters
 
 # --- Thumb encoders -------------------------------------------------------
 
@@ -168,13 +200,17 @@ def lcd_init_bytes(wait_a=100, wait_b=100, wait_c=200):
 
 
 def build_payload(version_int=116, nolie="stock", nologo="stock",
-                  fastlcd="stock", decoys=True):
+                  fastlcd="stock", verinfo="auto", decoys=True):
     """Build a decrypted firmware payload.
 
     nolie/nologo/fastlcd: 'stock' or 'patched'.  fastlcd additionally
     accepts 'ambiguous' (a second 100/100 delay pair -> tool refuses).
     version_int: self-check immediate (114/115/116), or None to omit
     the pattern entirely.
+    verinfo: 'auto' (stock string on stock builds, stamped on patched
+    ones), 'stock' (always the vendor string), None (no Ver Info
+    string at all), or an explicit ASCII string (already-stamped
+    input, used for idempotency checks).
     """
     p = bytearray(PAYLOAD_SIZE)
 
@@ -208,6 +244,40 @@ def build_payload(version_int=116, nolie="stock", nologo="stock",
     # Version self-check inside the scanned code region
     if version_int is not None:
         p[VER_OFFSET:VER_OFFSET + 6] = version_check_bytes(version_int)
+
+    # Ver Info format string (vendor spelling or stamped) + its single
+    # adr r1 reference (anchored on the adr -> string delta, as on real
+    # firmware). Stock builds keep the vendor string verbatim; any patch
+    # presence collapses the double space, drops the colon and appends
+    # the letters. The stamps land inside the free padding, so the tail
+    # pool words and every code address stay byte-identical.
+    if verinfo == "auto":
+        any_patched = "patched" in (nolie, nologo, fastlcd)
+        body = ver_info_stamped(nolie, nologo, fastlcd) if any_patched \
+            else VER_INFO_VENDOR
+    elif verinfo == "stock":
+        body = VER_INFO_VENDOR
+    elif verinfo is None:
+        body = None
+    else:
+        body = verinfo
+    if body is not None:
+        raw = body.encode("ascii") + b"\x00"
+        assert len(raw) <= 24, f"Ver Info string too long: {body!r}"
+        p[VER_INFO_OFFSET:VER_INFO_OFFSET + len(raw)] = raw
+        # Nonzero literal-pool word right after the padding, as on real
+        # firmware (the finder requires it: string + NUL + <=4 zero
+        # bytes + a nonzero word).
+        struct.pack_into("<I", p, VER_INFO_OFFSET + 24, 0x20000280)
+        string_addr = 0x08005000 + VER_INFO_OFFSET
+        adr_arm = (string_addr - VER_INFO_ADR_DELTA - 4) & ~3
+        adr_off = adr_arm - 0x08005000  # payload-relative
+        # Thumb ADR: target = (PC & ~3) + (imm8 << 2), PC = adr + 4.
+        delta = string_addr - ((adr_arm + 4) & ~3)
+        assert 0 < delta <= 0x3FC and delta % 4 == 0, hex(delta)
+        assert not any(p[adr_off:adr_off + 2]), \
+            "Ver Info adr slot clashes with another pattern"
+        struct.pack_into("<H", p, adr_off, 0xA100 | (delta >> 2))  # adr r1
 
     # Decoys in the data region
     if decoys:

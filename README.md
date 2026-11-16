@@ -17,7 +17,7 @@ This writes `t90_v<version>_nolie_nologo_fastlcd.atk` — the patched firmware w
 This tool supports three operations on `.atk` firmware files:
 - **info**: Display firmware header, vector table, extracted firmware version, and patch status
 - **extract**: Strip the header and decrypt the firmware payload to a raw `.bin` file
-- **patch**: Apply the "nolie" temperature display patch, the "nologo" boot logo skip, and the "fastlcd" LCD-timing trim
+- **patch**: Apply the "nolie" temperature display patch, the "nologo" boot logo skip, the "fastlcd" LCD-timing trim, and stamp the patch designation onto the "Ver Info" screen
 
 > **Note:** The `app_ver` field in the firmware header is always `1.0.01` regardless of the actual version. The real firmware version is extracted from a Thumb self-check pattern in the decrypted payload, and falls back to the filename if the pattern is not found.
 
@@ -153,6 +153,7 @@ Size: 104461 bytes (header: 13 + payload: 104448)
   nolie:    not patched (BNE at payload offset 0x820A, ARM 0x0800D20A)
   nologo:   not patched (mvn.w r4, #0x26 at payload offset 0x0FB84, ARM 0x08014B84)
   fastlcd:  not patched (LCD waits: 100 ms, 100 ms, 200 ms)
+  verinfo:  '(none)' on the Ver Info screen (menu 16, payload offset 0x11814)
 ```
 
 ### Extract
@@ -198,6 +199,7 @@ LCD wait at payload offset 0x04B76 (ARM 0x08009B76): movs r0, #100 -> movs r0, #
 LCD wait at payload offset 0x04B7C (ARM 0x08009B7C): movs r0, #100 -> movs r0, #70
 LCD wait at payload offset 0x050BC (ARM 0x0800A0BC): movs r0, #200 -> movs r0, #120
   Patched to: LCD waits [70, 70, 120] ms (saves ~140 ms of boot time)
+Ver Info designation at payload offset 0x11814 (ARM 0x08016814): 'T90%s V%1d.%1d.%1dNLF'
 
 Patched firmware written to: t90_nolie_nologo_fastlcd.atk
   Original size: 104461 bytes
@@ -228,6 +230,18 @@ Or skip selected patches with `--skip` (the inverse; cannot be combined with `--
 ```bash
 python3 t90_fw_tool.py patch --skip fastlcd t90.atk                  # -> t90_v1.1.4_nolie_nologo.atk
 ```
+
+### The "Ver Info" Designation
+
+Menu item 16 shows the model variant and firmware version from the
+format string `T90%s  V:%1d.%1d.%1d`. Every patch run also stamps a
+one-letter-per-patch designation onto that line: `N` = nolie,
+`L` = nologo, `F` = fastlcd, `-` = absent — e.g. `T90A V1.1.4NLF`
+for a fully patched build, `T90A V1.1.4N--` for nolie only. The
+stamp collapses the vendor's double space to one, drops the colon,
+and writes the letters into padding bytes inside the existing string
+footprint, so no address moves and the file size is unchanged. `info`
+reports the stamp as `verinfo:  'NLF'`; stock firmware shows `(none)`.
 
 ## References
 

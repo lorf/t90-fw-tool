@@ -37,12 +37,12 @@ FASTLCD_BYTES = {
     synthetic.WAIT_A_OFFSET, synthetic.WAIT_B_OFFSET, synthetic.WAIT_C_OFFSET
 }
 # Ver Info designation: stock 'T90%s  V:%1d.%1d.%1d' (20 chars) ->
-# stamped 'T90%s V%1d.%1d.%1d<letters>' (21 chars). Bytes 0..5 are
-# identical, then the collapsed space, dropped colon, shifted tail and
-# 3 letters differ (rel 6..20); the relocated NUL lands on old zero
+# stamped 'T90%s V%1d.%1d.%1d<letters>' (22 chars + NUL). Bytes 0..5
+# are identical, then the collapsed space, dropped colon, shifted tail
+# and 4 letters differ (rel 6..21); the relocated NUL lands on old zero
 # padding, and the pool word after the window is untouched.
 VER_BYTES = set(range(synthetic.VER_INFO_OFFSET + 6,
-                      synthetic.VER_INFO_OFFSET + 21))
+                      synthetic.VER_INFO_OFFSET + 22))
 
 
 # --- info ------------------------------------------------------------------
@@ -220,7 +220,7 @@ def test_patch_all(atk_file, tmp_path, cli):
     assert "nologo:   already patched" in out2
     assert "fastlcd:  already patched" in out2
     assert "version:   1.1.6" in out2
-    assert "verinfo:  'NLF'" in out2
+    assert "verinfo:  'NLF-'" in out2
 
     # Patched output is valid XOR of the payload (re-encrypt sanity).
     assert tool.xor_decrypt(patched[13:]) == new_p
@@ -315,7 +315,8 @@ def test_patch_only_earlykey(atk_file, tmp_path, cli):
     diffs = set(payload_diff_offsets(payload_of(read(path)),
                                      payload_of(read(out_path))))
     assert diffs == earlykey_diff_bytes(payload_of(read(path)),
-                                        payload_of(read(out_path)))
+                                        payload_of(read(out_path))) | VER_BYTES
+    assert tool.ver_info_letters(payload_of(read(out_path))) == "---E"
     # The cave landed at the expected offset, others untouched.
     new_p = payload_of(read(out_path))
     assert new_p[synthetic.CAVE_OFF:synthetic.CAVE_OFF + synthetic.CAVE_LEN] != bytes(

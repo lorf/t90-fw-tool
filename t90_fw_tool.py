@@ -26,7 +26,8 @@ panel ever fails to initialize on cold boot.
 
 Menu item 16 "Ver Info" shows the model variant and firmware version.
 Any patch run also stamps a one-letter-per-patch designation onto that
-line (N=nolie, L=nologo, F=fastlcd, '-'=absent), e.g. 'T90A V1.1.4NLF';
+line (N=nolie, L=nologo, F=fastlcd, E=earlykey, '-'=absent),
+e.g. 'T90A V1.1.4NLFE' fully patched, 'T90A V1.1.4NLF-' default;
 stock firmware keeps the vendor string. The stamp reuses padding
 bytes inside the existing string footprint, so no address moves.
 
@@ -646,7 +647,7 @@ def cmd_patch(args):
     if effective:
         # Stamp the designation letters onto the Ver Info screen: the
         # string shrinks by one space, drops the colon and grows up to
-        # 3 letters, all inside the existing footprint.  A stamp from an
+        # 4 letters, all inside the existing footprint.  A stamp from an
         # earlier (subset) run is normalized via the stock spelling, so
         # incremental patching just works.  Fail closed on any mismatch.
         ver_off = find_ver_info(new_payload)
@@ -730,10 +731,11 @@ def cmd_patch(args):
 # Stock spelling keeps the vendor's double space and colon; any patch
 # presence collapses the space and drops the colon, then appends one
 # letter per patch, so the padded areas encode the designation:
-# N/L/F = present, - = absent.
+# N/L/F/E = present, - = absent.
 VER_INFO_STOCK = "T90%s V%1d.%1d.%1d"
 VER_INFO_STOCK_RAW = b"T90%s  V:%1d.%1d.%1d\x00"
-VER_INFO_LETTERS = (("nolie", "N"), ("nologo", "L"), ("fastlcd", "F"))
+VER_INFO_LETTERS = (("nolie", "N"), ("nologo", "L"), ("fastlcd", "F"),
+                   ("earlykey", "E"))
 VER_INFO_MAX_LEN = 24  # string + NUL + the 4 free padding bytes
 VER_INFO_ADR_RD = 1  # fmt pointer is loaded into r1 (adr r1, #imm)
 
@@ -837,7 +839,7 @@ def find_ver_info(payload):
         if idx < 0:
             break
         tail = raw[idx:idx + VER_INFO_MAX_LEN + 8]
-        m = re.match(rb"T90%s {1,2}V:?%1d\.%1d\.%1d([-NLF]{3})?\x00", tail)
+        m = re.match(rb"T90%s {1,2}V:?%1d\.%1d\.%1d([-NLFE]{3,4})?\x00", tail)
         if m:
             end = idx + m.end()  # just past the NUL
             # Padded dots up to the next pool word must be zeros, and the
@@ -885,7 +887,7 @@ def _ver_info_refs(payload, string_off):
 def ver_info_letters(payload, string_off=None):
     """Read the designation letters stamped on the Ver Info string.
 
-    Returns e.g. 'NLF' (patched) / '---' (all absent) / None when the
+    Returns e.g. 'NLFE' (all patched) / '----' (none) / None when the
     string is missing or held no stamp.
     """
     if string_off is None:
@@ -893,7 +895,7 @@ def ver_info_letters(payload, string_off=None):
     if string_off is None:
         return None
     tail = bytes(payload[string_off:string_off + VER_INFO_MAX_LEN + 8])
-    m = re.match(rb"T90%s {1,2}V:?%1d\.%1d\.%1d([-NLF]{3})?\x00", tail)
+    m = re.match(rb"T90%s {1,2}V:?%1d\.%1d\.%1d([-NLFE]{3,4})?\x00", tail)
     if not m or not m.group(1):
         return None
     return m.group(1).decode()
@@ -902,9 +904,9 @@ def ver_info_letters(payload, string_off=None):
 def unstamp_ver_info(payload, string_off=None):
     """Restore the vendor spelling of a stamped Ver Info string.
 
-    Rewrites 'T90%s␣V…<letters>' back to 'T90%s␣␣V:…' in place; the
-    leftover byte past the stock NUL is already zero (old NUL), so the
-    result is byte-identical to the vendor string.  Raises ValueError
+    Rewrites 'T90%s␣V…<letters>' back to 'T90%s␣␣V:…' in place and
+    zeroes the padding window, so the result is byte-identical to the
+    vendor string.  Accepts legacy 3-letter stamps.  Raises ValueError
     when the string holds no stamp.
     """
     if string_off is None:
@@ -912,21 +914,27 @@ def unstamp_ver_info(payload, string_off=None):
         if string_off is None:
             raise ValueError("Ver Info string pattern not found")
     tail = bytes(payload[string_off:string_off + VER_INFO_MAX_LEN + 8])
-    m = re.match(rb"T90%s {1,2}V:?%1d\.%1d\.%1d([-NLF]{3})\x00", tail)
+    m = re.match(rb"T90%s {1,2}V:?%1d\.%1d\.%1d([-NLFE]{3,4})\x00", tail)
     if not m or not m.group(1):
         raise ValueError(f"Ver Info string holds no stamp: {tail[:24]!r}")
     payload[string_off:string_off + len(VER_INFO_STOCK_RAW)] = \
         VER_INFO_STOCK_RAW
+    # Clear any leftover stamp bytes (a 4-letter stamp extends 2 bytes
+    # past the stock NUL); the window is zero padding on stock firmware.
+    pad_end = string_off + VER_INFO_MAX_LEN
+    pad_start = string_off + len(VER_INFO_STOCK_RAW)
+    payload[pad_start:pad_end] = bytes(pad_end - pad_start)
     return VER_INFO_STOCK_RAW[:-1].decode()
 
 
-def ver_info_expected_letters(nolie, nologo, fastlcd):
+def ver_info_expected_letters(nolie, nologo, fastlcd, earlykey="stock"):
     """Designation letters for a patch set ('-' = patch absent)."""
     letters = dict(VER_INFO_LETTERS)
     return "".join(
         letters[patch] if state == "patched" else "-"
         for patch, state in (
-            ("nolie", nolie), ("nologo", nologo), ("fastlcd", fastlcd)
+            ("nolie", nolie), ("nologo", nologo),
+            ("fastlcd", fastlcd), ("earlykey", earlykey)
         )
     )
 
@@ -1402,7 +1410,8 @@ Image base: 0x08005000 (Cortex-M4F)
            hardware test showed no benefit + reboots; see README)
 
 every patch run also stamps the Ver Info screen (menu 16):
-  N/L/F = patch present, '-' = absent (e.g. 'T90A V1.1.4NLF')""",
+  N/L/F/E = patch present, '-' = absent (e.g. 'T90A V1.1.4NLFE',
+  default run stamps 'NLF-')""",
     )
     parser_patch.add_argument("file", help="Input .atk firmware file")
     parser_patch.add_argument("output", nargs="?", help="Output .atk file (optional)")

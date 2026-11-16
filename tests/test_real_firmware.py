@@ -140,4 +140,5 @@ def test_ver_info_anchor_stable(name):
         letter if f"_{patch}" in name else "-"
         for patch, letter in tool.VER_INFO_LETTERS
     )
-    assert letters in (None, expected), (name, letters)
+    # Legacy 3-letter stamps (pre-earlykey tool) lack the trailing E.
+    assert letters in (None, expected, expected[:3]), (name, letters)

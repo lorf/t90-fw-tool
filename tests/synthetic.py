@@ -87,7 +87,8 @@ VER_INFO_STOCK = "T90%s V%1d.%1d.%1d"
 VER_INFO_STAMP_OFFSET = VER_INFO_OFFSET + len(VER_INFO_STOCK.encode())
 # Vendor spelling on real firmware (double space + colon).
 VER_INFO_VENDOR = "T90%s  V:%1d.%1d.%1d"
-VER_INFO_LETTERS = (("nolie", "N"), ("nologo", "L"), ("fastlcd", "F"))
+VER_INFO_LETTERS = (("nolie", "N"), ("nologo", "L"), ("fastlcd", "F"),
+                      ("earlykey", "E"))
 VER_INFO_STATES = ("stock", "patched")
 
 # --- earlykey ------------------------------------------------------------
@@ -118,14 +119,20 @@ DECOY_LOGO_OFFSET = 0x1000  # stray 6F F0 26 04 with wrong neighbours
 # tested by mutating a payload inside the test instead.)
 
 
-def ver_info_stamped(nolie="stock", nologo="stock", fastlcd="stock"):
+def ver_info_stamped(nolie="stock", nologo="stock", fastlcd="stock",
+                   earlykey="stock"):
     """Ver Info format string with the designation letters for a patch set.
 
-    Returns the full ASCII string (no NUL), e.g. 'T90%s V%1d.%1d.%1dNLF'.
+    Returns the full ASCII string (no NUL), e.g. 'T90%s V%1d.%1d.%1dNLFE'.
     '-' marks a patch that is not present.  Raises KeyError on an
     unknown patch state (guards against builder/tool skew).
+    Earlykey accepts 'clean' as an alias for 'stock' (its detector
+    vocabulary).
     """
-    states = {"nolie": nolie, "nologo": nologo, "fastlcd": fastlcd}
+    if earlykey == "clean":
+        earlykey = "stock"
+    states = {"nolie": nolie, "nologo": nologo, "fastlcd": fastlcd,
+              "earlykey": earlykey}
     unknown = [s for s in states.values() if s not in VER_INFO_STATES]
     if unknown:
         raise KeyError(f"unknown patch state: {unknown[0]!r}")
@@ -329,9 +336,10 @@ def build_payload(version_int=116, nolie="stock", nologo="stock",
     # the letters. The stamps land inside the free padding, so the tail
     # pool words and every code address stay byte-identical.
     if verinfo == "auto":
-        any_patched = "patched" in (nolie, nologo, fastlcd) or earlykey == "patched"
-        body = ver_info_stamped(nolie, nologo, fastlcd) if any_patched \
-            else VER_INFO_VENDOR
+        ek_state = "patched" if earlykey == "patched" else "stock"
+        any_patched = "patched" in (nolie, nologo, fastlcd, ek_state)
+        body = ver_info_stamped(nolie, nologo, fastlcd, ek_state) \
+            if any_patched else VER_INFO_VENDOR
     elif verinfo == "stock":
         body = VER_INFO_VENDOR
     elif verinfo is None:

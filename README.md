@@ -216,7 +216,7 @@ LCD wait at payload offset 0x04B76 (ARM 0x08009B76): movs r0, #100 -> movs r0, #
 LCD wait at payload offset 0x04B7C (ARM 0x08009B7C): movs r0, #100 -> movs r0, #70
 LCD wait at payload offset 0x050BC (ARM 0x0800A0BC): movs r0, #200 -> movs r0, #120
   Patched to: LCD waits [70, 70, 120] ms (saves ~140 ms of boot time)
-Ver Info designation at payload offset 0x11814 (ARM 0x08016814): 'T90%s V%1d.%1d.%1dNLF'
+Ver Info designation at payload offset 0x11814 (ARM 0x08016814): 'T90%s V%1d.%1d.%1dNLF-'
 
 Patched firmware written to: t90_nolie_nologo_fastlcd.atk
   Original size: 104461 bytes
@@ -254,12 +254,15 @@ python3 t90_fw_tool.py patch --skip fastlcd t90.atk                  # -> t90_v1
 Menu item 16 shows the model variant and firmware version from the
 format string `T90%s  V:%1d.%1d.%1d`. Every patch run also stamps a
 one-letter-per-patch designation onto that line: `N` = nolie,
-`L` = nologo, `F` = fastlcd, `-` = absent — e.g. `T90A V1.1.4NLF`
-for a fully patched build, `T90A V1.1.4N--` for nolie only. The
+`L` = nologo, `F` = fastlcd, `E` = earlykey, `-` = absent — e.g.
+`T90A V1.1.4NLFE` for a fully patched build, `T90A V1.1.4NLF-` for the
+default run, `T90A V1.1.4N---` for nolie only. The
 stamp collapses the vendor's double space to one, drops the colon,
 and writes the letters into padding bytes inside the existing string
 footprint, so no address moves and the file size is unchanged. `info`
-reports the stamp as `verinfo:  'NLF'`; stock firmware shows `(none)`.
+reports the stamp as `verinfo:  'NLF-'` for the default run
+(`NLFE` with `--only nolie,nologo,fastlcd,earlykey`); stock firmware
+shows `(none)`.
 
 ## References
 

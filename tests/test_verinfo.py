@@ -2,7 +2,7 @@
 
 The tool rewrites the stock format string 'T90%s  V:%1d.%1d.%1d' to
 'T90%s V%1d.%1d.%1d<letters>' (N=nolie, L=nologo, F=fastlcd,
-'-'=absent), reusing the padding inside the existing footprint.
+E=earlykey, '-'=absent), reusing the padding inside the existing footprint.
 """
 
 import struct
@@ -84,14 +84,16 @@ def test_find_ver_info_dangling_adr_refused():
 @pytest.mark.parametrize(
     "states,expected",
     [
-        (("stock", "stock", "stock"), "---"),
-        (("patched", "stock", "stock"), "N--"),
-        (("stock", "patched", "stock"), "-L-"),
-        (("stock", "stock", "patched"), "--F"),
-        (("patched", "patched", "stock"), "NL-"),
-        (("patched", "stock", "patched"), "N-F"),
-        (("stock", "patched", "patched"), "-LF"),
-        (("patched", "patched", "patched"), "NLF"),
+        (("stock", "stock", "stock", "stock"), "----"),
+        (("patched", "stock", "stock", "stock"), "N---"),
+        (("stock", "patched", "stock", "stock"), "-L--"),
+        (("stock", "stock", "patched", "stock"), "--F-"),
+        (("stock", "stock", "stock", "patched"), "---E"),
+        (("patched", "patched", "stock", "stock"), "NL--"),
+        (("patched", "stock", "patched", "stock"), "N-F-"),
+        (("stock", "patched", "patched", "stock"), "-LF-"),
+        (("patched", "patched", "patched", "patched"), "NLFE"),
+        (("patched", "patched", "patched", "stock"), "NLF-"),
     ],
 )
 def test_ver_info_expected_letters(states, expected):
@@ -101,31 +103,32 @@ def test_ver_info_expected_letters(states, expected):
 def test_stamp_ver_info_writes_in_place():
     payload = bytearray(synthetic.build_payload())
     off = synthetic.VER_INFO_OFFSET
-    stamped = tool.stamp_ver_info(payload, off, "NLF")
-    assert stamped == "T90%s V%1d.%1d.%1dNLF"
+    stamped = tool.stamp_ver_info(payload, off, "NLFE")
+    assert stamped == "T90%s V%1d.%1d.%1dNLFE"
     # String start and its ADR reference are untouched; the stamp fits
-    # the old footprint (stock 20 bytes -> stamped 23 of 24 allowed).
+    # the old footprint (stock 20 chars -> stamped 22 chars + NUL,
+    # 23 of 24 allowed).
     assert bytes(payload[off:off + 6]) == b"T90%s "
     assert len(stamped) + 1 <= tool.VER_INFO_MAX_LEN
     assert tool.find_ver_info(bytes(payload)) == off
-    assert tool.ver_info_letters(bytes(payload), off) == "NLF"
+    assert tool.ver_info_letters(bytes(payload), off) == "NLFE"
     # The letters sit exactly at the documented stamp offset.
     assert bytes(payload[synthetic.VER_INFO_STAMP_OFFSET:
-                         synthetic.VER_INFO_STAMP_OFFSET + 3]) == b"NLF"
+                         synthetic.VER_INFO_STAMP_OFFSET + 4]) == b"NLFE"
 
 
 def test_stamp_ver_info_refuses_nonstock():
     payload = bytearray(synthetic.build_payload())
-    tool.stamp_ver_info(payload, synthetic.VER_INFO_OFFSET, "N--")
+    tool.stamp_ver_info(payload, synthetic.VER_INFO_OFFSET, "N---")
     with pytest.raises(ValueError, match="already stamped"):
-        tool.stamp_ver_info(payload, synthetic.VER_INFO_OFFSET, "NLF")
+        tool.stamp_ver_info(payload, synthetic.VER_INFO_OFFSET, "NLFE")
 
 
 def test_unstamp_restores_vendor_spelling():
     payload = bytearray(synthetic.build_payload(
         nolie="patched", nologo="patched"))
     off = synthetic.VER_INFO_OFFSET
-    assert tool.ver_info_letters(bytes(payload), off) == "NL-"
+    assert tool.ver_info_letters(bytes(payload), off) == "NL--"
     restored = tool.unstamp_ver_info(payload, off)
     assert restored == synthetic.VER_INFO_VENDOR
     assert bytes(payload[off:off + len(synthetic.VER_INFO_VENDOR) + 1]) == \
@@ -143,7 +146,7 @@ def test_unstamp_refuses_unstamped():
 def test_stamp_unstamp_roundtrip():
     payload = bytearray(synthetic.build_payload())
     before = bytes(payload)
-    tool.stamp_ver_info(payload, synthetic.VER_INFO_OFFSET, "N-F")
+    tool.stamp_ver_info(payload, synthetic.VER_INFO_OFFSET, "N-F-")
     tool.unstamp_ver_info(payload, synthetic.VER_INFO_OFFSET)
     assert bytes(payload) == before
 
@@ -156,7 +159,7 @@ def test_patch_only_nolie_stamps_N_dashes(atk_file, tmp_path, cli):
     code, out, err = cli("patch", "--only", "nolie", path)
     assert code == 0, err
     patched = payload_of(read(tmp_path / "t90_v1.1.6_nolie.atk"))
-    assert tool.ver_info_letters(patched) == "N--"
+    assert tool.ver_info_letters(patched) == "N---"
 
 
 def test_patch_skip_fastlcd_stamps_NL_dash(atk_file, tmp_path, cli):
@@ -164,7 +167,7 @@ def test_patch_skip_fastlcd_stamps_NL_dash(atk_file, tmp_path, cli):
     code, out, err = cli("patch", "--skip", "fastlcd", path)
     assert code == 0, err
     patched = payload_of(read(tmp_path / "t90_v1.1.6_nolie_nologo.atk"))
-    assert tool.ver_info_letters(patched) == "NL-"
+    assert tool.ver_info_letters(patched) == "NL--"
 
 
 def test_patch_all_stamps_NLF(atk_file, tmp_path, cli):
@@ -173,17 +176,41 @@ def test_patch_all_stamps_NLF(atk_file, tmp_path, cli):
     assert code == 0, err
     out_path = tmp_path / "t90_v1.1.6_nolie_nologo_fastlcd.atk"
     patched = payload_of(read(out_path))
-    assert tool.ver_info_letters(patched) == "NLF"
+    assert tool.ver_info_letters(patched) == "NLF-"
     code, out2, _ = cli("info", str(out_path))
     assert code == 0
-    assert "verinfo:  'NLF'" in out2
+    assert "verinfo:  'NLF-'" in out2
+
+
+def test_patch_only_earlykey_stamps_E(atk_file, tmp_path, cli):
+    path = atk_file()
+    code, out, err = cli("patch", "--only", "earlykey", path)
+    assert code == 0, err
+    patched = payload_of(read(tmp_path / "t90_v1.1.6_earlykey.atk"))
+    assert tool.ver_info_letters(patched) == "---E"
+
+
+def test_patch_all_with_earlykey_stamps_NLFE(atk_file, tmp_path, cli):
+    path = atk_file()
+    code, out, err = cli(
+        "patch", "--only", "nolie,nologo,fastlcd,earlykey", path)
+    assert code == 0, err
+    out_path = tmp_path / "t90_v1.1.6_nolie_nologo_fastlcd_earlykey.atk"
+    assert out_path.exists(), out
+    patched = payload_of(read(out_path))
+    assert tool.ver_info_letters(patched) == "NLFE"
+    # Stamped string is 22 chars + NUL = 23 bytes in the 24-byte window.
+    off = tool.find_ver_info(patched)
+    end = patched.index(b"\x00", off)
+    assert end - off == 22
+    assert end + 1 - off <= tool.VER_INFO_MAX_LEN
 
 
 def test_patch_is_idempotent_on_stamped_input(atk_file, tmp_path, cli):
     path = atk_file(payload=synthetic.build_payload(
         nolie="patched", nologo="patched", fastlcd="patched"))
     before = payload_of(read(path))
-    assert tool.ver_info_letters(before) == "NLF"  # builder stamps it
+    assert tool.ver_info_letters(before) == "NLF-"  # builder stamps it
     code, out, err = cli("patch", path)
     assert code == 0, err
     after = payload_of(
@@ -197,13 +224,13 @@ def test_patch_stamp_updates_on_incremental_run(atk_file, tmp_path, cli):
     # effective set instead of aborting.
     payload = synthetic.build_payload(
         nolie="patched", nologo="patched",
-        verinfo="T90%s V%1d.%1d.%1dN--")
+        verinfo="T90%s V%1d.%1d.%1dN---")
     path = atk_file(payload=payload)
     code, out, err = cli("patch", "--only", "nolie", path)
     assert code == 0, err
-    assert "updated 'N--' -> 'T90%s V%1d.%1d.%1dNL-'" in out
+    assert "updated 'N---' -> 'T90%s V%1d.%1d.%1dNL--'" in out
     patched = payload_of(read(tmp_path / "t90_v1.1.6_nolie_nologo.atk"))
-    assert tool.ver_info_letters(patched) == "NL-"
+    assert tool.ver_info_letters(patched) == "NL--"
 
 
 def test_patch_garbage_ver_info_errors(atk_file, cli):

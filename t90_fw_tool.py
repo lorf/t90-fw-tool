@@ -272,17 +272,18 @@ def cmd_info(args):
     st_state, st_offs = find_pd_settle(payload)
     if st_state == "stock":
         o = ", ".join(f"0x{off:05X}" for off in st_offs)
-        print(f"  fastsettle: not patched (PD settle 31/41 passes at payload "
-              f"offsets {o})")
+        print(f"  fastsettle: not patched (PD settle 31/41 passes "
+              f"(620/820 ms) at payload offsets {o})")
     elif st_state in ("patched", "custom"):
         sites = read_pd_settle(payload)
         imms = sites[1]
         passes = f"{imms[0] + 1}/{imms[1] + 1}"
+        ms = f"{(imms[0] + 1) * 20}/{(imms[1] + 1) * 20} ms"
         if st_state == "patched":
             print(f"  fastsettle: already patched (PD settle "
-                  f"{passes} passes)")
+                  f"{passes} passes ({ms}))")
         else:
-            print(f"  fastsettle: custom (PD settle {passes} passes)")
+            print(f"  fastsettle: custom (PD settle {passes} passes ({ms}))")
     elif st_state == "absent":
         print(f"  fastsettle: unknown (PD settle pattern not found - "
               f"unsupported firmware version?)")

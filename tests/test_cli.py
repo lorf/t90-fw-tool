@@ -384,7 +384,7 @@ def test_patch_fastsettle_custom_values(atk_file, tmp_path, cli):
     assert tool.read_pd_settle(new_p)[1] == (9, 19)  # 200/400 ms
     code, info, _ = cli("info", str(out_path))
     assert code == 0
-    assert "fastsettle: custom (PD settle 10/20 passes)" in info
+    assert "fastsettle: custom (PD settle 10/20 passes (200/400 ms))" in info
     assert tool.ver_info_letters(new_p) == "-----S"
 
 
@@ -411,7 +411,7 @@ def test_patch_fastsettle_zero_disables_debounce(atk_file, tmp_path, cli):
     new_p = payload_of(read(tmp_path / "t90_v1.1.6_fastsettle.atk"))
     assert tool.read_pd_settle(new_p)[1] == (0, 0)
     code, info, _ = cli("info", str(tmp_path / "t90_v1.1.6_fastsettle.atk"))
-    assert "fastsettle: custom (PD settle 1/1 passes)" in info
+    assert "fastsettle: custom (PD settle 1/1 passes (20/20 ms))" in info
 
 
 def test_patch_fastsettle_rejects_bad_values(atk_file, cli):

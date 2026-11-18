@@ -92,11 +92,13 @@ def test_patch_status_matches_filename(name):
     else:
         assert pd_state == "absent", f"{name}: expected no PD counter"
 
-    # fastsettle: stock thresholds everywhere so far (no archive file
-    # carries the patch yet); "_fastsettle" in a future file means patched.
+    # fastsettle: "_fastsettle" in a name means the patch is present -
+    # default tune ("patched") or a custom --fastsettle tune ("custom";
+    # filenames cannot encode values, the stamp only marks presence).
     st_state, _ = tool.find_pd_settle(payload)
     if "_fastsettle" in name:
-        assert st_state == "patched", f"{name}: expected fastsettle patched"
+        assert st_state in ("patched", "custom"), \
+            f"{name}: expected fastsettle patched"
     else:
         assert st_state == "stock", f"{name}: expected stock fastsettle"
 

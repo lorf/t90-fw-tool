@@ -40,8 +40,8 @@ self-corrects on the next heater-path re-evaluation. Present only on
 firmwares with the pre-wait counter (v1.1.6); older versions settle
 without it, so the patch reports "not applicable" there and skips.
 
-The "fastsettle" patch halves the CH224Q PD-settle stability thresholds
-(31/41 consecutive stable reads -> 16/21), saving ~300-400 ms of
+The "fastsettle" patch trims the CH224Q PD-settle stability thresholds
+(31/41 consecutive stable reads -> 17/22), saving ~300 ms of
 blank-screen time with a dead button at boot. Unlike the dead pre-wait,
 the settle debounces the charger link before the voltage-profile
 request, so this patch stays opt-in (--only fastsettle) until
@@ -792,7 +792,7 @@ def cmd_patch(args):
 
     if do_fastsettle:
         # Trim the PD stability settle (default 31/41 consecutive stable
-        # reads -> 16/21, or the --fastsettle MS,MS tune). The sites are
+        # reads -> 17/22, or the --fastsettle MS,MS tune). The sites are
         # located regardless of their current values, so re-tuning a
         # custom-patched image rewrites them in place. 0 ms disables the
         # debounce: one 20 ms pass still samples the charger.
@@ -1662,13 +1662,13 @@ def find_pd_task(payload):
 # + ble, bit #0x10 path) and 41 (cmp #0x28 + ble, bit #0x08 path)
 # consecutive passes: 620/820 ms of blank screen with a dead button.
 # Same counter-increment prefix as the pre-wait, but closed by BLE
-# (stay in the settle loop) instead of BGE. Trimming both thresholds in
-# half (16/21 passes) saves ~300-400 ms; a wrong early profile request
+# (stay in the settle loop) instead of BGE. Trimming both thresholds
+# (17/22 passes, 340/440 ms) saves ~300 ms; a wrong early profile request
 # self-corrects on the next heater-path re-evaluation, but this guard
 # debounces the charger link, so the patch stays opt-in until
 # hardware-validated. Present on all versions (same shape v1.1.4-v1.1.6).
 PD_SETTLE_ORIG = (0x1E, 0x28)
-PD_SETTLE_NEW = (0x0F, 0x14)
+PD_SETTLE_NEW = (0x10, 0x15)
 
 
 def _pd_settle_offsets(payload, imm=None):
@@ -1723,7 +1723,7 @@ def find_pd_settle(payload):
     """Locate the two PD settle threshold compares.
 
     Returns (state, [off_a, off_b]): "stock" (31/41 passes), "patched"
-    (16/21 passes), "custom" (exactly two sites, other values),
+    (17/22 passes), "custom" (exactly two sites, other values),
     "absent" (no settle counter in this firmware), or "unknown"
     (ambiguous - fail closed, do not patch).
     """
@@ -1839,11 +1839,11 @@ Image base: 0x08005000 (Cortex-M4F)
            use --skip earlykey to opt out; see README)
   fastpd   shorten the PD pre-wait (100x20 ms -> 5 passes, v1.1.6 only;
            no-op on versions without the counter)
-  fastsettle halve the PD settle thresholds (31/41 -> 16/21 passes;
+  fastsettle trim the PD settle thresholds (31/41 -> 17/22 passes;
            opt-in until hardware-validated; see README)
 
 tunable parameters (imply the patch; conflict with --skip of the same):
-  --fastsettle MS,MS  settle thresholds in ms, 0..600 each (default 320,420);
+  --fastsettle MS,MS  settle thresholds in ms, 0..600 each (default 340,440);
            rounded to the 20 ms charger tick; 0 disables the debounce
   --fastlcd MS,MS     LCD waits in ms: post-reset (x2) and SLPOUT
            (default 70,120); values below the MIPI DCS 120 ms minimum
@@ -1871,7 +1871,7 @@ every patch run also stamps the Ver Info screen (menu 16):
     parser_patch.add_argument(
         "--fastsettle", type=_parse_fastsettle, default=None,
         metavar="MS,MS",
-        help="PD settle thresholds in ms, 0..600 each (default 320,420); "
+        help="PD settle thresholds in ms, 0..600 each (default 340,440); "
              "rounded to the 20 ms tick; implies --only fastsettle",
     )
     parser_patch.add_argument(

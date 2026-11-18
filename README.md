@@ -125,8 +125,8 @@ After `fastpd`, the remaining ~0.6–0.8 s of blank screen is the same
 charger task's stability settle: 31 or 41 consecutive stable reads
 (`cmp r0, #0x1E` / `#0x28`, one 20 ms pass each) before the
 voltage-profile request goes out, depending on the charger response
-path. The "fastsettle" patch halves both thresholds (16/21 passes),
-saving ~300–400 ms. Unlike the dead pre-wait, this settle debounces the
+path. The "fastsettle" patch trims both thresholds (17/22 passes),
+saving ~300 ms. Unlike the dead pre-wait, this settle debounces the
 charger link, so the patch stays opt-in until validated on several
 chargers and PD/DC supplies:
 
@@ -135,8 +135,8 @@ python3 t90_fw_tool.py patch --only fastsettle t90.atk   # -> t90_v1.1.6_fastset
 ```
 
 Both thresholds are tunable: `--fastsettle MS,MS` sets them in
-milliseconds (defaults 320,420; each 0..600, rounded to the nearest
-20 ms charger tick — half-up, so 325 ms becomes 320 ms). The flag
+milliseconds (defaults 340,440; each 0..600, rounded to the nearest
+20 ms charger tick — half-up, so 335 ms becomes 340 ms). The flag
 implies the patch and conflicts with `--skip fastsettle`. 0 ms disables
 the debounce for that path (the counter still takes one 20 ms pass to
 sample the charger). Custom values show as `custom` in `info` and are

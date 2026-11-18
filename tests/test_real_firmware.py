@@ -74,9 +74,11 @@ def test_patch_status_matches_filename(name):
         assert tool.find_logo_anim(payload) is not None, name
 
     if "_fastlcd" in name:
-        waits = tool.find_lcd_waits(payload, patched=True)
+        # Presence only: the filename cannot encode a custom --fastlcd
+        # tune, and the stamp only marks presence too.
+        waits = tool.read_lcd_waits(payload)
         assert waits is not None, name
-        assert [v for _, v in waits] == list(tool.LCD_WAIT_PATCH)
+        assert [v for _, v in waits] != list(tool.LCD_WAIT_ORIG), name
     else:
         waits = tool.find_lcd_waits(payload, patched=False)
         assert waits is not None, name

@@ -37,7 +37,7 @@ FASTLCD_BYTES = {
     synthetic.WAIT_A_OFFSET, synthetic.WAIT_B_OFFSET, synthetic.WAIT_C_OFFSET
 }
 FASTPD_BYTES = {synthetic.PD_OFFSET + 12}  # cmp r0,#100 -> cmp r0,#5
-SETTLE_BYTES = {  # cmp r0,#30 -> #15 and cmp r0,#40 -> #20
+SETTLE_BYTES = {  # cmp r0,#30 -> #16 and cmp r0,#40 -> #21
     synthetic.SETTLE_A_OFFSET + 12, synthetic.SETTLE_B_OFFSET + 12
 }
 # Ver Info designation: stock 'T90%s  V:%1d.%1d.%1d' (20 chars) ->
@@ -349,7 +349,7 @@ def test_patch_fastsettle_idempotent(atk_file, tmp_path, cli):
     before = read(path)
     code, out, err = cli("patch", "--only", "fastsettle", path)
     assert code == 0, err
-    assert "already at 320/420 ms (16/21 passes" in out
+    assert "already at 340/440 ms (17/22 passes" in out
     assert read(tmp_path / "t90_v1.1.6_fastsettle.atk") == before
 
 
@@ -396,14 +396,14 @@ def test_patch_fastsettle_custom_values(atk_file, tmp_path, cli):
 def test_patch_fastsettle_rounds_to_tick(atk_file, tmp_path, cli):
     path = atk_file()
     code, out, err = cli("patch", "--only", "fastsettle",
-                         "--fastsettle", "325,415", path)
+                         "--fastsettle", "335,445", path)
     assert code == 0, err
-    assert "rounded to 320,420 ms" in out
+    assert "rounded to 340,440 ms" in out
     new_p = payload_of(read(tmp_path / "t90_v1.1.6_fastsettle.atk"))
     assert tool.read_pd_settle(new_p)[1] == tool.PD_SETTLE_NEW
     # Multiples of 20 produce no rounding note.
     code, out, _ = cli("patch", "--only", "fastsettle",
-                       "--fastsettle", "320,420", path)
+                       "--fastsettle", "340,440", path)
     assert code == 0
     assert "rounded" not in out
 

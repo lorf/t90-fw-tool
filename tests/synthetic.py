@@ -328,7 +328,7 @@ def build_payload(version_int=116, nolie="stock", nologo="stock",
     passes), or 'absent' (task anchor only, emulating v1.1.4/v1.1.5
     which settle the PD link without a pre-wait counter).
     fastsettle: 'stock' (settle thresholds at 31/41 passes) or 'patched'
-    (16/21 passes).
+    (17/22 passes).
     version_int: self-check immediate (114/115/116), or None to omit
     the pattern entirely.
     verinfo: 'auto' (stock string on stock builds, stamped on patched

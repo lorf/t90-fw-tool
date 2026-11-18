@@ -253,11 +253,13 @@ def cmd_info(args):
 
     pd_state, pd_off = find_pd_prewait(payload)
     if pd_state == "stock":
-        print(f"  fastpd:   not patched (PD pre-wait 100 passes at payload "
+        print(f"  fastpd:   not patched (PD pre-wait {PD_PREWAIT_ORIG} passes "
+              f"({PD_PREWAIT_ORIG * 20} ms) at payload "
               f"offset 0x{pd_off:05X}, ARM 0x{0x08005000 + pd_off:08X})")
     elif pd_state == "patched":
         print(f"  fastpd:   already patched (PD pre-wait {PD_PREWAIT_NEW} "
-              f"passes at payload offset 0x{pd_off:05X})")
+              f"passes ({PD_PREWAIT_NEW * 20} ms) "
+              f"at payload offset 0x{pd_off:05X})")
     elif pd_state == "absent":
         if find_pd_task(payload):
             print(f"  fastpd:   not applicable (no PD pre-wait counter in "

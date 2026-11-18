@@ -86,6 +86,16 @@ The "fastlcd" patch rewrites the three `movs r0, #imm` delay arguments (single h
 python3 t90_fw_tool.py patch --skip fastlcd t90.atk   # -> t90_v1.1.4_nolie_nologo.atk
 ```
 
+The waits are tunable: `--fastlcd RESET,SLPOUT` sets the post-reset pair
+and the SLPOUT wait in ms (defaults 70,120; each 1..255). Values below
+the MIPI DCS 120 ms minimum print a warning but are applied — no
+confirmation is asked, so a blind panel means reflashing stock. The flag
+implies the patch. Custom values show as `custom` in `info`:
+
+```bash
+python3 t90_fw_tool.py patch --fastlcd 70,120 t90.atk   # explicit defaults
+```
+
 A plain `python3 t90_fw_tool.py patch t90.atk` applies the four stable patches (nolie, nologo, fastlcd, fastpd). On v1.1.4/v1.1.5, which settle the PD link without a pre-wait counter, `fastpd` reports "not applicable" and skips, so the run still succeeds.
 
 Combined with nologo (which skips the ~21-draw logo animation loop entirely), this removes the last large fixed delay on the boot path: ~140 ms saved on top of the skipped animation.
@@ -122,6 +132,20 @@ chargers and PD/DC supplies:
 
 ```bash
 python3 t90_fw_tool.py patch --only fastsettle t90.atk   # -> t90_v1.1.6_fastsettle.atk
+```
+
+Both thresholds are tunable: `--fastsettle MS,MS` sets them in
+milliseconds (defaults 320,420; each 0..600, rounded to the nearest
+20 ms charger tick — half-up, so 325 ms becomes 320 ms). The flag
+implies the patch and conflicts with `--skip fastsettle`. 0 ms disables
+the debounce for that path (the counter still takes one 20 ms pass to
+sample the charger). Custom values show as `custom` in `info` and are
+not recorded in the Ver Info stamp (letters mark presence only), so
+re-tuning an already-tuned image rewrites the thresholds in place:
+
+```bash
+python3 t90_fw_tool.py patch --fastsettle 200,400 t90.atk   # 10/20 passes
+python3 t90_fw_tool.py patch --fastsettle 0,0 t90.atk       # no debounce
 ```
 
 Same counter shape on all three versions (found via the `movw #0x1388`
@@ -291,6 +315,10 @@ Or skip selected patches with `--skip` (the inverse; cannot be combined with `--
 ```bash
 python3 t90_fw_tool.py patch --skip fastlcd t90.atk                  # -> t90_v1.1.4_nolie_nologo.atk
 ```
+
+`--fastsettle MS,MS` and `--fastlcd MS,MS` tune the two trims (see above)
+and imply their patch even when `--only` names other patches; combining
+either with `--skip` of the same patch is an error.
 
 ### The "Ver Info" Designation
 

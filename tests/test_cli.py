@@ -344,7 +344,7 @@ def test_patch_fastsettle_idempotent(atk_file, tmp_path, cli):
     before = read(path)
     code, out, err = cli("patch", "--only", "fastsettle", path)
     assert code == 0, err
-    assert "already shortened" in out
+    assert "already at 320/420 ms (16/21 passes" in out
     assert read(tmp_path / "t90_v1.1.6_fastsettle.atk") == before
 
 
@@ -368,6 +368,140 @@ def test_patch_fastsettle_absent_errors(atk_file, cli):
     code, _, err = cli("patch", "--only", "fastsettle", path)
     assert code == 1
     assert "PD settle threshold pattern not found" in err
+
+
+def test_patch_fastsettle_custom_values(atk_file, tmp_path, cli):
+    path = atk_file()
+    code, out, err = cli("patch", "--only", "fastsettle",
+                         "--fastsettle", "200,400", path)
+    assert code == 0, err
+    out_path = tmp_path / "t90_v1.1.6_fastsettle.atk"
+    assert out_path.exists(), out
+    diffs = set(payload_diff_offsets(payload_of(read(path)),
+                                     payload_of(read(out_path))))
+    assert diffs == SETTLE_BYTES | VER_BYTES
+    new_p = payload_of(read(out_path))
+    assert tool.read_pd_settle(new_p)[1] == (9, 19)  # 200/400 ms
+    code, info, _ = cli("info", str(out_path))
+    assert code == 0
+    assert "fastsettle: custom (PD settle 10/20 passes)" in info
+    assert tool.ver_info_letters(new_p) == "-----S"
+
+
+def test_patch_fastsettle_rounds_to_tick(atk_file, tmp_path, cli):
+    path = atk_file()
+    code, out, err = cli("patch", "--only", "fastsettle",
+                         "--fastsettle", "325,415", path)
+    assert code == 0, err
+    assert "rounded to 320,420 ms" in out
+    new_p = payload_of(read(tmp_path / "t90_v1.1.6_fastsettle.atk"))
+    assert tool.read_pd_settle(new_p)[1] == tool.PD_SETTLE_NEW
+    # Multiples of 20 produce no rounding note.
+    code, out, _ = cli("patch", "--only", "fastsettle",
+                       "--fastsettle", "320,420", path)
+    assert code == 0
+    assert "rounded" not in out
+
+
+def test_patch_fastsettle_zero_disables_debounce(atk_file, tmp_path, cli):
+    path = atk_file()
+    code, out, err = cli("patch", "--only", "fastsettle",
+                         "--fastsettle", "0,0", path)
+    assert code == 0, err
+    new_p = payload_of(read(tmp_path / "t90_v1.1.6_fastsettle.atk"))
+    assert tool.read_pd_settle(new_p)[1] == (0, 0)
+    code, info, _ = cli("info", str(tmp_path / "t90_v1.1.6_fastsettle.atk"))
+    assert "fastsettle: custom (PD settle 1/1 passes)" in info
+
+
+def test_patch_fastsettle_rejects_bad_values(atk_file, cli):
+    path = atk_file()
+    for bad in ("0,700", "700,0", "100", "100,200,300", "a,b", "100.5,200"):
+        with pytest.raises(SystemExit):  # argparse error, exit 2
+            cli("patch", "--only", "fastsettle",
+                "--fastsettle", bad, path)
+
+
+def test_patch_fastsettle_flag_conflicts_with_skip(atk_file, cli):
+    path = atk_file()
+    code, _, err = cli("patch", "--skip", "fastsettle",
+                       "--fastsettle", "200,400", path)
+    assert code == 1
+    assert "conflicts with --skip fastsettle" in err
+
+
+def test_patch_fastsettle_flag_implies_patch(atk_file, tmp_path, cli):
+    path = atk_file()
+    code, out, err = cli("patch", "--only", "nolie",
+                         "--fastsettle", "200,400", path)
+    assert code == 0, err
+    new_p = payload_of(read(tmp_path / "t90_v1.1.6_nolie_fastsettle.atk"))
+    assert tool.ver_info_letters(new_p) == "N----S"
+    assert tool.read_pd_settle(new_p)[1] == (9, 19)
+
+
+def test_patch_fastsettle_retune_in_place(atk_file, tmp_path, cli):
+    path = atk_file()
+    code, _, err = cli("patch", "--only", "fastsettle",
+                       "--fastsettle", "200,400", path)
+    assert code == 0, err
+    tuned = tmp_path / "t90_v1.1.6_fastsettle.atk"
+    code, out, err = cli("patch", "--only", "fastsettle",
+                         "--fastsettle", "100,120", str(tuned))
+    assert code == 0, err
+    assert "cmp r0, #9 -> cmp r0, #4" in out
+    assert "cmp r0, #19 -> cmp r0, #5" in out
+    new_p = payload_of(read(tmp_path / "t90_v1.1.6_fastsettle.atk"))
+    assert tool.read_pd_settle(new_p)[1] == (4, 5)
+    # Same values re-run byte-identical.
+    before = read(tmp_path / "t90_v1.1.6_fastsettle.atk")
+    code, out, err = cli("patch", "--only", "fastsettle",
+                         "--fastsettle", "100,120",
+                         str(tmp_path / "t90_v1.1.6_fastsettle.atk"))
+    assert code == 0, err
+    assert "already at 100/120 ms (5/6 passes" in out
+    assert read(tmp_path / "t90_v1.1.6_fastsettle.atk") == before
+
+
+def test_patch_fastlcd_custom_values_warn_only(atk_file, tmp_path, cli):
+    path = atk_file()
+    code, out, err = cli("patch", "--only", "fastlcd",
+                         "--fastlcd", "50,100", path)
+    assert code == 0, err
+    assert "below the" in out  # MIPI warnings, but applied anyway
+    out_path = tmp_path / "t90_v1.1.6_fastlcd.atk"
+    diffs = set(payload_diff_offsets(payload_of(read(path)),
+                                     payload_of(read(out_path))))
+    assert diffs == FASTLCD_BYTES | VER_BYTES
+    new_p = payload_of(read(out_path))
+    assert [v for _, v in tool.read_lcd_waits(new_p)] == [50, 50, 100]
+    code, info, _ = cli("info", str(out_path))
+    assert "fastlcd:  custom (LCD waits: 50 ms, 50 ms, 100 ms)" in info
+
+
+def test_patch_fastlcd_spec_values_no_warning(atk_file, tmp_path, cli):
+    path = atk_file()
+    code, out, err = cli("patch", "--only", "fastlcd",
+                         "--fastlcd", "70,120", path)
+    assert code == 0, err
+    assert "below the" not in out
+    assert "Warning" not in out
+
+
+def test_patch_fastlcd_rejects_bad_values(atk_file, cli):
+    path = atk_file()
+    for bad in ("0,120", "70,0", "70,256", "70", "70,120,130", "x,120"):
+        with pytest.raises(SystemExit):  # argparse error, exit 2
+            cli("patch", "--only", "fastlcd",
+                "--fastlcd", bad, path)
+
+
+def test_patch_fastlcd_flag_conflicts_with_skip(atk_file, cli):
+    path = atk_file()
+    code, _, err = cli("patch", "--skip", "fastlcd",
+                       "--fastlcd", "70,120", path)
+    assert code == 1
+    assert "conflicts with --skip fastlcd" in err
 
 
 def test_patch_fastpd_ambiguous_refused(atk_file, cli):

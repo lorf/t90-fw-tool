@@ -46,7 +46,11 @@ blank-screen time with a dead button at boot. Unlike the dead pre-wait,
 the settle debounces the charger link before the voltage-profile
 request, so this patch stays opt-in (--only fastsettle) until
 hardware-validated on several chargers. Present on all versions with
-the same shape (v1.1.4/v1.1.5/v1.1.6).
+the same shape (v1.1.4/v1.1.5/v1.1.6). Both thresholds are tunable via
+--fastsettle MS,MS (0..600 ms each, rounded to the 20 ms charger tick;
+0 disables the debounce); --fastlcd MS,MS tunes the LCD post-reset and
+SLPOUT waits (below-MIPI values warn but are applied). A parameter flag
+implies its patch; custom values show as `custom` in `info`.
 
 The "earlykey" patch captures keypresses during boot waits: all
 delay_ms() callers are redirected to a polling-delay routine in an
@@ -233,14 +237,16 @@ def cmd_info(args):
         print(f"  nologo:   unknown (logo animation pattern not found - "
               f"unsupported firmware version?)")
 
-    lcd = find_lcd_waits(payload, patched=False)
-    lcd_patched = find_lcd_waits(payload, patched=True)
-    if lcd is not None:
-        vals = ", ".join(f"{v} ms" for _, v in lcd)
-        print(f"  fastlcd:  not patched (LCD waits: {vals})")
-    elif lcd_patched is not None:
-        vals = ", ".join(f"{v} ms" for _, v in lcd_patched)
-        print(f"  fastlcd:  already patched (LCD waits: {vals})")
+    lcd_sites = read_lcd_waits(payload)
+    if lcd_sites is not None:
+        vals = ", ".join(f"{v} ms" for _, v in lcd_sites)
+        cur = [v for _, v in lcd_sites]
+        if cur == list(LCD_WAIT_ORIG):
+            print(f"  fastlcd:  not patched (LCD waits: {vals})")
+        elif cur == list(LCD_WAIT_PATCH):
+            print(f"  fastlcd:  already patched (LCD waits: {vals})")
+        else:
+            print(f"  fastlcd:  custom (LCD waits: {vals})")
     else:
         print(f"  fastlcd:  unknown (LCD init wait pattern not found - "
               f"unsupported firmware version?)")
@@ -268,9 +274,15 @@ def cmd_info(args):
         o = ", ".join(f"0x{off:05X}" for off in st_offs)
         print(f"  fastsettle: not patched (PD settle 31/41 passes at payload "
               f"offsets {o})")
-    elif st_state == "patched":
-        print(f"  fastsettle: already patched (PD settle "
-              f"{PD_SETTLE_NEW[0] + 1}/{PD_SETTLE_NEW[1] + 1} passes)")
+    elif st_state in ("patched", "custom"):
+        sites = read_pd_settle(payload)
+        imms = sites[1]
+        passes = f"{imms[0] + 1}/{imms[1] + 1}"
+        if st_state == "patched":
+            print(f"  fastsettle: already patched (PD settle "
+                  f"{passes} passes)")
+        else:
+            print(f"  fastsettle: custom (PD settle {passes} passes)")
     elif st_state == "absent":
         print(f"  fastsettle: unknown (PD settle pattern not found - "
               f"unsupported firmware version?)")
@@ -548,12 +560,51 @@ def cmd_patch(args):
         selected = set(DEFAULT_PATCHES) - {p for group in args.skip for p in group}
     else:
         selected = set(DEFAULT_PATCHES)
+    # A parameter flag implies selecting its patch; combining it with
+    # --skip of the same patch is a contradiction - fail closed.
+    skipped = {p for group in (args.skip or []) for p in group}
+    for flag, name in ((args.fastsettle, "fastsettle"),
+                       (args.fastlcd, "fastlcd")):
+        if flag is not None:
+            if name in skipped:
+                print(f"Error: --{name} MS,MS conflicts with --skip {name}.",
+                      file=sys.stderr)
+                return 1
+            selected.add(name)
     do_nolie = "nolie" in selected
     do_nologo = "nologo" in selected
     do_fastlcd = "fastlcd" in selected
     do_earlykey = "earlykey" in selected
     do_fastpd = "fastpd" in selected
     do_fastsettle = "fastsettle" in selected
+
+    # Resolve tunable targets (defaults when the flag is absent).
+    # fastsettle thresholds are charger-task ticks (20 ms each); non-
+    # multiples of 20 round to the nearest tick, half-up.
+    if args.fastsettle is not None:
+        raw = args.fastsettle
+        rounded = (round20(raw[0]), round20(raw[1]))
+        if rounded != tuple(raw):
+            print(f"Note: --fastsettle {raw[0]},{raw[1]} ms rounded to "
+                  f"{rounded[0]},{rounded[1]} ms (20 ms tick).")
+        settle_new = tuple(settle_ms_to_imm(m) for m in rounded)
+        settle_ms = rounded
+    else:
+        settle_new = PD_SETTLE_NEW
+        settle_ms = tuple((imm + 1) * 20 for imm in PD_SETTLE_NEW)
+    if args.fastlcd is not None:
+        reset_ms, slpout_ms = args.fastlcd
+        if reset_ms < LCD_WAIT_PATCH[0]:
+            print(f"Warning: post-reset {reset_ms} ms is below the "
+                  f"default {LCD_WAIT_PATCH[0]} ms (MIPI DCS needs 120 ms "
+                  f"after reset; the panel may fail to init).")
+        if slpout_ms < LCD_WAIT_PATCH[2]:
+            print(f"Warning: SLPOUT {slpout_ms} ms is below the "
+                  f"default {LCD_WAIT_PATCH[2]} ms (MIPI DCS needs 120 ms "
+                  f"after SLPOUT; the panel may fail to init).")
+        lcd_new = (reset_ms, reset_ms, slpout_ms)
+    else:
+        lcd_new = LCD_WAIT_PATCH
 
     with open(args.file, "rb") as f:
         data = bytearray(f.read())
@@ -577,13 +628,15 @@ def cmd_patch(args):
         already.add("nolie")
     if find_logo_anim_patch(payload) is not None:
         already.add("nologo")
-    if find_lcd_waits(payload, patched=True) is not None:
+    lcd_sites = read_lcd_waits(payload)
+    if lcd_sites is not None \
+            and [v for _, v in lcd_sites] != list(LCD_WAIT_ORIG):
         already.add("fastlcd")
     if find_earlykey(payload)[0] == "patched":
         already.add("earlykey")
     if find_pd_prewait(payload)[0] == "patched":
         already.add("fastpd")
-    if find_pd_settle(payload)[0] == "patched":
+    if find_pd_settle(payload)[0] in ("patched", "custom"):
         already.add("fastsettle")
     # fastpd exists only where the PD pre-wait counter exists (v1.1.6);
     # older firmwares settle without it, so there is nothing to shorten.
@@ -657,23 +710,26 @@ def cmd_patch(args):
             print(f"  Patched to: movs r4, #2; nop (loop runs zero times, logo skipped)")
 
     if do_fastlcd:
-        # Shorten LCD controller init waits: 100,100,200 ms -> 70,70,120 ms.
-        waits = find_lcd_waits(new_payload, patched=False)
-        if waits is None:
-            if find_lcd_waits(new_payload, patched=True) is not None:
-                print(f"LCD waits already shortened (patch present).")
-            else:
-                print("Error: LCD init wait pattern not found.", file=sys.stderr)
-                print("  Unsupported firmware version?", file=sys.stderr)
-                return 1
+        # Shorten LCD controller init waits (default 100,100,200 ms ->
+        # 70,70,120 ms, or the --fastlcd MS,MS tune). The sites are
+        # located regardless of their current values, so re-tuning a
+        # custom-patched image rewrites them in place.
+        sites = read_lcd_waits(new_payload)
+        if sites is None:
+            print("Error: LCD init wait pattern not found.", file=sys.stderr)
+            print("  Unsupported firmware version?", file=sys.stderr)
+            return 1
+        cur = [v for _, v in sites]
+        if cur == list(lcd_new):
+            print(f"LCD waits already at {list(lcd_new)} ms (patch present).")
         else:
-            for (movs_off, old), new in zip(waits, LCD_WAIT_PATCH):
+            for (movs_off, old), new in zip(sites, lcd_new):
                 arm = 0x08005000 + movs_off
                 print(f"LCD wait at payload offset 0x{movs_off:05X} "
                       f"(ARM 0x{arm:08X}): movs r0, #{old} -> movs r0, #{new}")
                 struct.pack_into("<H", new_payload, movs_off, 0x2000 | new)
-            print(f"  Patched to: LCD waits {list(LCD_WAIT_PATCH)} ms "
-                  f"(saves ~{sum(LCD_WAIT_ORIG) - sum(LCD_WAIT_PATCH)} ms of boot time)")
+            print(f"  Patched to: LCD waits {list(lcd_new)} ms "
+                  f"(saves ~{sum(LCD_WAIT_ORIG) - sum(lcd_new)} ms of boot time)")
 
     if do_earlykey:
         # Redirect all delay_ms() callers to a polling delay in the cave:
@@ -735,27 +791,29 @@ def cmd_patch(args):
                       f"of blank-screen time)")
 
     if do_fastsettle:
-        # Halve the PD stability settle: 31/41 consecutive stable reads
-        # become 16/21 (still hundreds of ms of debounce on each
-        # charger-response bit). Saves ~300-400 ms of blank-screen time.
-        state, cmp_offs = find_pd_settle(new_payload)
-        if cmp_offs is None:
+        # Trim the PD stability settle (default 31/41 consecutive stable
+        # reads -> 16/21, or the --fastsettle MS,MS tune). The sites are
+        # located regardless of their current values, so re-tuning a
+        # custom-patched image rewrites them in place. 0 ms disables the
+        # debounce: one 20 ms pass still samples the charger.
+        sites = read_pd_settle(new_payload)
+        if sites is None:
             print("Error: PD settle threshold pattern not found.", file=sys.stderr)
             print("  Unsupported firmware version?", file=sys.stderr)
             return 1
-        elif state == "patched":
-            print(f"PD settle already shortened (patch present).")
+        cmp_offs, cur = sites
+        if cur == settle_new:
+            print(f"PD settle already at {settle_ms[0]}/{settle_ms[1]} ms "
+                  f"({settle_new[0] + 1}/{settle_new[1] + 1} passes, "
+                  f"patch present).")
         else:
-            for cmp_off, old, new in zip(cmp_offs, PD_SETTLE_ORIG,
-                                         PD_SETTLE_NEW):
+            for cmp_off, old, new in zip(cmp_offs, cur, settle_new):
                 arm = 0x08005000 + cmp_off
                 print(f"PD settle threshold at payload offset 0x{cmp_off:05X} "
                       f"(ARM 0x{arm:08X}): cmp r0, #{old} -> cmp r0, #{new}")
                 struct.pack_into("<H", new_payload, cmp_off, 0x2800 | new)
-            print(f"  Patched to: PD settle "
-                  f"{PD_SETTLE_NEW[0] + 1}/{PD_SETTLE_NEW[1] + 1} passes "
-                  f"(saves ~300-400 ms of blank-screen time, "
-                  f"one path per boot)")
+            print(f"  Patched to: PD settle {settle_ms[0]}/{settle_ms[1]} ms "
+                  f"({settle_new[0] + 1}/{settle_new[1] + 1} passes)")
 
     if effective:
         # Stamp the designation letters onto the Ver Info screen: the
@@ -1116,14 +1174,16 @@ def _bl_target(payload, addr):
     return (addr + 4 + v) & 0xFFFFFFFF
 
 
-def find_ms_delay(payload):
+def find_ms_delay(payload, any_wait=False):
     """Find the payload offset of the delay_ms() routine.
 
     Anchored on the LCD init SLPOUT wait: the unique sequence
-        movs r0, #0x11; bl <cmd>; movs r0, #0xC8; bl <delay>;
+        movs r0, #0x11; bl <cmd>; movs r0, #<wait>; bl <delay>;
         ...; movs r0, #0x29
     The delay callee is verified by its distinctive head bytes.
-    Returns the payload offset, or None.
+    With any_wait=False only the known stock/patched waits (200/120)
+    anchor the search; any_wait=True accepts any wait value (needed to
+    recognize custom --fastlcd tunes). Returns the payload offset, or None.
     """
     raw = bytes(payload)
     start = 0
@@ -1132,9 +1192,10 @@ def find_ms_delay(payload):
         if idx < 0:
             return None
         # Expect: movs(2) bl32(4) movs(2) bl32(4), then 0x29 0x20 nearby.
-        # The middle movs holds the SLPOUT wait (200 stock, 120 patched).
-        if idx + 12 <= len(raw) and raw[idx + 6] in (0xC8, 0x78) \
-                and raw[idx + 7] == 0x20 \
+        # The middle movs holds the SLPOUT wait (200 stock, 120 patched,
+        # arbitrary with a custom --fastlcd tune).
+        if idx + 12 <= len(raw) and raw[idx + 7] == 0x20 \
+                and (any_wait or raw[idx + 6] in (0xC8, 0x78)) \
                 and bytes([0x29, 0x20]) in raw[idx:idx + 16]:
             h1 = struct.unpack_from("<H", payload, idx + 2)[0]
             h1b = struct.unpack_from("<H", payload, idx + 8)[0]
@@ -1153,21 +1214,21 @@ def find_ms_delay(payload):
         start = idx + 1
 
 
-def find_lcd_waits(payload, patched=False):
-    """Find the three LCD-init wait arguments (movs r0, #imm before BL delay).
+def read_lcd_waits(payload):
+    """Find the three LCD-init wait arguments regardless of value.
 
-    Unpatched: two adjacent `movs r0, #100` (post-reset settle) plus the
-    single `movs r0, #200` inside the SLPOUT(0x11)..DISPON(0x29) cluster.
-    Patched: same sites with 70/70/120. Other delay_ms() callers (beep,
-    task pacing, touch init) use different values and are never matched.
+    Sites: two adjacent `movs r0, #imm` (post-reset settle) plus the
+    single `movs r0, #imm` inside the SLPOUT(0x11)..DISPON(0x29) cluster.
+    Other delay_ms() callers (beep, task pacing, touch init) are never
+    adjacent pairs, so exactly one pair exists on known firmwares.
 
-    Returns [(movs_offset, imm)] x3 in code order, or None.
+    Returns [(movs_offset, imm)] x3 in code order, or None when the
+    sites are missing or ambiguous (fail closed, do not patch).
     """
-    delay_off = find_ms_delay(payload)
+    delay_off = find_ms_delay(payload, any_wait=True)
     if delay_off is None:
         return None
     delay_addr = 0x08005000 + delay_off
-    want = LCD_WAIT_PATCH if patched else LCD_WAIT_ORIG
 
     # Collect every (bl_addr, imm) calling delay_ms via `movs r0, #imm`
     # (directly, or through an earlykey polling-delay cave).
@@ -1185,8 +1246,7 @@ def find_lcd_waits(payload, patched=False):
         callers.append((off - 2, imm))  # movs offset, imm
 
     by_addr = dict(callers)
-    # Site C: the unique caller with the wanted 3rd value inside the
-    # SLPOUT..DISPON cluster (anchor-verified).
+    # Site C: the unique delay caller inside the SLPOUT..DISPON cluster.
     site_c = None
     raw = bytes(payload)
     start = 0
@@ -1195,24 +1255,52 @@ def find_lcd_waits(payload, patched=False):
         if idx < 0:
             break
         cand = idx + 6  # movs offset of the wait inside the cluster
-        if by_addr.get(cand) == want[2] \
+        if cand in by_addr \
                 and bytes([0x29, 0x20]) in raw[idx:idx + 16]:
+            if site_c is not None:  # ambiguous - refuse to patch
+                return None
             site_c = cand
-            break
         start = idx + 1
     if site_c is None:
         return None
-    # Sites A/B: the unique adjacent pair with the wanted 1st/2nd values.
+    # Sites A/B: the unique adjacent pair with a shared value (the two
+    # post-reset sites always carry one value: stock 100/100, default
+    # 70/70, or the single reset value of a custom --fastlcd tune).
+    # Other adjacent delay callers (decoys, beep/pacing sequences) use
+    # differing values and never match.
     sites_ab = None
-    addrs = sorted(by_addr)
+    addrs = sorted(a for a in by_addr if a != site_c)
     for a, b in zip(addrs, addrs[1:]):
-        if b - a == 6 and by_addr[a] == want[0] and by_addr[b] == want[1]:
+        if b - a == 6 and by_addr[a] is not None \
+                and by_addr[a] == by_addr[b]:
             if sites_ab is not None:  # ambiguous - refuse to patch
                 return None
             sites_ab = (a, b)
     if sites_ab is None:
         return None
-    return [(sites_ab[0], want[0]), (sites_ab[1], want[1]), (site_c, want[2])]
+    return [(sites_ab[0], by_addr[sites_ab[0]]),
+            (sites_ab[1], by_addr[sites_ab[1]]),
+            (site_c, by_addr[site_c])]
+
+
+def find_lcd_waits(payload, patched=False):
+    """Find the three LCD-init wait arguments (movs r0, #imm before BL delay).
+
+    Unpatched: two adjacent `movs r0, #100` (post-reset settle) plus the
+    single `movs r0, #200` inside the SLPOUT(0x11)..DISPON(0x29) cluster.
+    Patched: same sites with 70/70/120. Other delay_ms() callers (beep,
+    task pacing, touch init) use different values and are never matched.
+
+    Returns [(movs_offset, imm)] x3 in code order, or None (missing,
+    ambiguous, or held values other than the wanted set).
+    """
+    sites = read_lcd_waits(payload)
+    if sites is None:
+        return None
+    want = LCD_WAIT_PATCH if patched else LCD_WAIT_ORIG
+    if [v for _, v in sites] == list(want):
+        return sites
+    return None
 
 
 def _bl_encode(src_addr, tgt_addr):
@@ -1319,7 +1407,8 @@ def _is_delay_caller(payload, bl_off, delay_addr):
 
 def find_delay_callers(payload):
     """Find all BL sites calling delay_ms(). Returns ([bl_offsets], delay_off)."""
-    delay_off = find_ms_delay(payload)
+    # any_wait: the SLPOUT anchor may hold a custom --fastlcd value.
+    delay_off = find_ms_delay(payload, any_wait=True)
     if delay_off is None:
         return None, None
     delay_addr = 0x08005000 + delay_off
@@ -1582,12 +1671,13 @@ PD_SETTLE_ORIG = (0x1E, 0x28)
 PD_SETTLE_NEW = (0x0F, 0x14)
 
 
-def _pd_settle_offsets(payload, imm):
-    """Payload offsets of a settle `cmp r0, #imm` halfword.
+def _pd_settle_offsets(payload, imm=None):
+    """Payload offsets of settle `cmp r0, #imm` halfwords.
 
     Same fixed prefix as the pre-wait counter, but the gate closes with
     BLE (keep settling) rather than BGE. Register/literal-pool fields
     vary by build, so only opcode classes and fixed bytes are matched.
+    With imm=None every threshold value matches; returns [(cmp_off, imm)].
     """
     raw = bytes(payload)
     n = len(raw)
@@ -1605,33 +1695,49 @@ def _pd_settle_offsets(payload, imm):
             continue
         if raw[off + 10] != 0x08 or raw[off + 11] != 0x80:  # strh r0, [r1]
             continue
-        if raw[off + 12] != imm or raw[off + 13] != 0x28:  # cmp r0, #imm
+        if raw[off + 13] != 0x28:  # cmp r0, #imm
+            continue
+        if imm is not None and raw[off + 12] != imm:
             continue
         hw = raw[off + 14] | (raw[off + 15] << 8)
         if (hw & 0xF000) != 0xD000 or ((hw >> 8) & 0xF) != 0xD:  # ble
             continue
-        hits.append(off + 12)
+        hits.append((off + 12, raw[off + 12]))
     return hits
+
+
+def read_pd_settle(payload):
+    """Locate the two PD settle threshold compares regardless of value.
+
+    Returns ([off_a, off_b], (imm_a, imm_b)) in code order (A = bit #0x10
+    path, lower address on all known versions), or None when the site
+    count is not exactly two (missing or ambiguous - fail closed).
+    """
+    hits = sorted(_pd_settle_offsets(payload))
+    if len(hits) != 2:
+        return None
+    return ([h[0] for h in hits], (hits[0][1], hits[1][1]))
 
 
 def find_pd_settle(payload):
     """Locate the two PD settle threshold compares.
 
-    Returns (state, [off_31, off_41]): "stock" (31/41 passes), "patched"
-    (16/21 passes), "absent" (no settle counter in this firmware), or
-    "unknown" (ambiguous - fail closed, do not patch).
+    Returns (state, [off_a, off_b]): "stock" (31/41 passes), "patched"
+    (16/21 passes), "custom" (exactly two sites, other values),
+    "absent" (no settle counter in this firmware), or "unknown"
+    (ambiguous - fail closed, do not patch).
     """
-    old_a = _pd_settle_offsets(payload, PD_SETTLE_ORIG[0])
-    old_b = _pd_settle_offsets(payload, PD_SETTLE_ORIG[1])
-    new_a = _pd_settle_offsets(payload, PD_SETTLE_NEW[0])
-    new_b = _pd_settle_offsets(payload, PD_SETTLE_NEW[1])
-    if len(old_a) == 1 and len(old_b) == 1 and not new_a and not new_b:
-        return ("stock", [old_a[0], old_b[0]])
-    if len(new_a) == 1 and len(new_b) == 1 and not old_a and not old_b:
-        return ("patched", [new_a[0], new_b[0]])
-    if not old_a and not old_b and not new_a and not new_b:
-        return ("absent", None)
-    return ("unknown", None)
+    sites = read_pd_settle(payload)
+    if sites is None:
+        if not _pd_settle_offsets(payload):
+            return ("absent", None)
+        return ("unknown", None)
+    offs, imms = sites
+    if imms == PD_SETTLE_ORIG:
+        return ("stock", offs)
+    if imms == PD_SETTLE_NEW:
+        return ("patched", offs)
+    return ("custom", offs)
 
 
 def _parse_only(value):
@@ -1644,6 +1750,53 @@ def _parse_only(value):
             f"unknown patch(es): {bad} (choose from {', '.join(PATCH_NAMES)})"
         )
     return names
+
+
+def _parse_ms_pair(value, what, count, lo, hi):
+    """Parse a 'MS[,MS]' flag value into raw integer milliseconds."""
+    parts = [p.strip() for p in value.split(",")]
+    if len(parts) != count:
+        raise argparse.ArgumentTypeError(
+            f"{what} expects {count} comma-separated ms values "
+            f"(got {value!r})"
+        )
+    try:
+        ms = [int(p) for p in parts]
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"{what} expects integer milliseconds (got {value!r})"
+        )
+    for m in ms:
+        if not lo <= m <= hi:
+            raise argparse.ArgumentTypeError(
+                f"{what} values must be {lo}..{hi} ms (got {m})"
+            )
+    return tuple(ms)
+
+
+def _parse_fastsettle(value):
+    """Parse --fastsettle MS,MS (both thresholds, 0..600 ms each)."""
+    return _parse_ms_pair(value, "--fastsettle", 2, 0, 600)
+
+
+def _parse_fastlcd(value):
+    """Parse --fastlcd MS,MS (post-reset, SLPOUT; 1..255 ms each)."""
+    return _parse_ms_pair(value, "--fastlcd", 2, 1, 255)
+
+
+def round20(ms):
+    """Round ms to the nearest multiple of 20 (half-up)."""
+    return (ms + 10) // 20 * 20
+
+
+def settle_ms_to_imm(ms):
+    """Convert a settle threshold in ms to a cmp immediate.
+
+    The charger task ticks every 20 ms and the loop exits once the
+    counter exceeds the immediate, so passes = imm + 1. 0 ms (no
+    debounce) still needs one pass to sample the charger: imm 0.
+    """
+    return max(0, round20(ms) // 20 - 1)
 
 
 def main():
@@ -1689,6 +1842,13 @@ Image base: 0x08005000 (Cortex-M4F)
   fastsettle halve the PD settle thresholds (31/41 -> 16/21 passes;
            opt-in until hardware-validated; see README)
 
+tunable parameters (imply the patch; conflict with --skip of the same):
+  --fastsettle MS,MS  settle thresholds in ms, 0..600 each (default 320,420);
+           rounded to the 20 ms charger tick; 0 disables the debounce
+  --fastlcd MS,MS     LCD waits in ms: post-reset (x2) and SLPOUT
+           (default 70,120); values below the MIPI DCS 120 ms minimum
+           warn but are applied
+
 every patch run also stamps the Ver Info screen (menu 16):
   N/L/F/E/P/S = patch present, '-' = absent (e.g. 'T90A1.1.4NLFEPS',
   default run stamps 'NLF-P-')""",
@@ -1707,6 +1867,18 @@ every patch run also stamps the Ver Info screen (menu 16):
         metavar="PATCH[,PATCH]",
         help="Apply the default patches except the given ones, "
              "comma-separated (earlykey/fastsettle never in the default set)",
+    )
+    parser_patch.add_argument(
+        "--fastsettle", type=_parse_fastsettle, default=None,
+        metavar="MS,MS",
+        help="PD settle thresholds in ms, 0..600 each (default 320,420); "
+             "rounded to the 20 ms tick; implies --only fastsettle",
+    )
+    parser_patch.add_argument(
+        "--fastlcd", type=_parse_fastlcd, default=None,
+        metavar="MS,MS",
+        help="LCD post-reset and SLPOUT waits in ms (default 70,120); "
+             "below-spec values warn but are applied; implies fastlcd",
     )
 
     args = parser.parse_args()

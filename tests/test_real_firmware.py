@@ -82,6 +82,16 @@ def test_patch_status_matches_filename(name):
         assert waits is not None, name
         assert [v for _, v in waits] == list(tool.LCD_WAIT_ORIG)
 
+    # fastpd: v1.1.6 stock carries the pre-wait counter, patched files
+    # carry the shortened one; v1.1.4/v1.1.5 have no counter (absent).
+    pd_state, _ = tool.find_pd_prewait(payload)
+    if "_fastpd" in name:
+        assert pd_state == "patched", f"{name}: expected fastpd patched"
+    elif "_v1.1.6" in name:
+        assert pd_state == "stock", f"{name}: expected stock fastpd"
+    else:
+        assert pd_state == "absent", f"{name}: expected no PD counter"
+
     # earlykey: filenames ending in _earlykey carry the patch; the rest
     # (including fastlcd+earlykey combos) must detect through redirects.
     ek, cave_off, _, _ = tool.find_earlykey(payload)
@@ -140,5 +150,6 @@ def test_ver_info_anchor_stable(name):
         letter if f"_{patch}" in name else "-"
         for patch, letter in tool.VER_INFO_LETTERS
     )
-    # Legacy 3-letter stamps (pre-earlykey tool) lack the trailing E.
-    assert letters in (None, expected, expected[:3]), (name, letters)
+    # Legacy stamps (pre-fastpd tool) lack the trailing letter(s).
+    assert letters in (None, expected, expected[:3], expected[:4]), \
+        (name, letters)

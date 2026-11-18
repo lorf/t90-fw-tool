@@ -26,10 +26,19 @@ panel ever fails to initialize on cold boot.
 
 Menu item 16 "Ver Info" shows the model variant and firmware version.
 Any patch run also stamps a one-letter-per-patch designation onto that
-line (N=nolie, L=nologo, F=fastlcd, E=earlykey, '-'=absent),
-e.g. 'T90A V1.1.4NLFE' fully patched, 'T90A V1.1.4NLF-' default;
+line (N=nolie, L=nologo, F=fastlcd, E=earlykey, P=fastpd, '-'=absent),
+e.g. 'T90A V1.1.4NLFEP' fully patched, 'T90A V1.1.4NLFP-' default;
 stock firmware keeps the vendor string. The stamp reuses padding
 bytes inside the existing string footprint, so no address moves.
+
+The "fastpd" patch shortens the CH224Q PD-settle pre-wait (100x20 ms
+passes -> 5 passes), saving ~1.9 s of blank-screen time with a dead
+button at boot. Only the dead wait before the first charger detect is
+trimmed; the 31/41-sample stability settle that protects the PD
+voltage-profile request is left intact, and a wrong early request
+self-corrects on the next heater-path re-evaluation. Present only on
+firmwares with the pre-wait counter (v1.1.6); older versions settle
+without it, so the patch reports "not applicable" there and skips.
 
 The "earlykey" patch captures keypresses during boot waits: all
 delay_ms() callers are redirected to a polling-delay routine in an
@@ -226,6 +235,24 @@ def cmd_info(args):
         print(f"  fastlcd:  already patched (LCD waits: {vals})")
     else:
         print(f"  fastlcd:  unknown (LCD init wait pattern not found - "
+              f"unsupported firmware version?)")
+
+    pd_state, pd_off = find_pd_prewait(payload)
+    if pd_state == "stock":
+        print(f"  fastpd:   not patched (PD pre-wait 100 passes at payload "
+              f"offset 0x{pd_off:05X}, ARM 0x{0x08005000 + pd_off:08X})")
+    elif pd_state == "patched":
+        print(f"  fastpd:   already patched (PD pre-wait {PD_PREWAIT_NEW} "
+              f"passes at payload offset 0x{pd_off:05X})")
+    elif pd_state == "absent":
+        if find_pd_task(payload):
+            print(f"  fastpd:   not applicable (no PD pre-wait counter in "
+                  f"this firmware version)")
+        else:
+            print(f"  fastpd:   unknown (PD settle task pattern not found - "
+                  f"unsupported firmware version?)")
+    else:
+        print(f"  fastpd:   unknown (ambiguous PD pre-wait pattern - "
               f"unsupported firmware version?)")
 
     ver_off = find_ver_info(payload)
@@ -484,7 +511,7 @@ def find_function_location(payload, instruction=None):
 
 
 def cmd_patch(args):
-    """Apply the selected patches (default: nolie + nologo + fastlcd).
+    """Apply the selected patches (default: nolie + nologo + fastlcd + fastpd).
 
     earlykey is experimental and opt-in only (--only earlykey): hardware
     testing showed no button improvement and spontaneous reboots during
@@ -500,6 +527,7 @@ def cmd_patch(args):
     do_nologo = "nologo" in selected
     do_fastlcd = "fastlcd" in selected
     do_earlykey = "earlykey" in selected
+    do_fastpd = "fastpd" in selected
 
     with open(args.file, "rb") as f:
         data = bytearray(f.read())
@@ -527,7 +555,15 @@ def cmd_patch(args):
         already.add("fastlcd")
     if find_earlykey(payload)[0] == "patched":
         already.add("earlykey")
-    effective = selected | already
+    if find_pd_prewait(payload)[0] == "patched":
+        already.add("fastpd")
+    # fastpd exists only where the PD pre-wait counter exists (v1.1.6);
+    # older firmwares settle without it, so there is nothing to shorten.
+    na = set()
+    if "fastpd" in selected and find_pd_prewait(payload)[0] == "absent" \
+            and find_pd_task(payload):
+        na.add("fastpd")
+    effective = (selected - na) | already
 
     new_payload = bytearray(payload)
 
@@ -644,10 +680,36 @@ def cmd_patch(args):
                   f"({len(cave)} bytes); {len(callers)} delay_ms callers "
                   f"redirected (keys sampled every 8th ms of every wait)")
 
+    if do_fastpd:
+        # Shorten the dead PD pre-wait: the 100x20 ms counter becomes 5
+        # passes (100 ms, still covering the CH224 power-on reset). The
+        # 31/41-sample stability settle afterwards is untouched.
+        if "fastpd" in na:
+            print(f"fastpd: not applicable to this firmware version "
+                  f"(no PD pre-wait counter); skipping.")
+        else:
+            state, cmp_off = find_pd_prewait(new_payload)
+            if cmp_off is None:
+                print("Error: PD pre-wait counter pattern not found.", file=sys.stderr)
+                print("  Unsupported firmware version?", file=sys.stderr)
+                return 1
+            elif state == "patched":
+                print(f"PD pre-wait already shortened (patch present).")
+            else:
+                arm = 0x08005000 + cmp_off
+                print(f"PD pre-wait counter at payload offset 0x{cmp_off:05X} "
+                      f"(ARM 0x{arm:08X}): cmp r0, #{PD_PREWAIT_ORIG} "
+                      f"-> cmp r0, #{PD_PREWAIT_NEW}")
+                struct.pack_into("<H", new_payload, cmp_off,
+                                 0x2800 | PD_PREWAIT_NEW)
+                print(f"  Patched to: PD pre-wait {PD_PREWAIT_NEW} passes "
+                      f"(saves ~{(PD_PREWAIT_ORIG - PD_PREWAIT_NEW) * 20} ms "
+                      f"of blank-screen time)")
+
     if effective:
         # Stamp the designation letters onto the Ver Info screen: the
         # string shrinks by one space, drops the colon and grows up to
-        # 4 letters, all inside the existing footprint.  A stamp from an
+        # 5 letters, all inside the existing footprint.  A stamp from an
         # earlier (subset) run is normalized via the stock spelling, so
         # incremental patching just works.  Fail closed on any mismatch.
         ver_off = find_ver_info(new_payload)
@@ -684,13 +746,17 @@ def cmd_patch(args):
     output = bytearray(data[:13])  # Keep original header
     output.extend(encrypted_payload)
 
-    suffix = ""
-    for name in ("nolie", "nologo", "fastlcd", "earlykey"):
-        if name in effective:
-            suffix += "_" + name
-    if not suffix:
+    if not effective:
+        if na:
+            print(f"Nothing to patch for this firmware version "
+                  f"({', '.join(sorted(na))} not applicable).")
+            return 0
         print("Error: no patches selected.", file=sys.stderr)
         return 1
+    suffix = ""
+    for name in ("nolie", "nologo", "fastlcd", "earlykey", "fastpd"):
+        if name in effective:
+            suffix += "_" + name
     # Determine output file
     if args.output:
         output_file = args.output
@@ -703,7 +769,8 @@ def cmd_patch(args):
         changed = True
         while changed:
             changed = False
-            for old in ("_nolie", "_nologo", "_fastlcd", "_earlykey"):
+            for old in ("_nolie", "_nologo", "_fastlcd", "_earlykey",
+                        "_fastpd"):
                 if base.endswith(old):
                     base = base[:-len(old)]
                     changed = True
@@ -731,11 +798,11 @@ def cmd_patch(args):
 # Stock spelling keeps the vendor's double space and colon; any patch
 # presence collapses the space and drops the colon, then appends one
 # letter per patch, so the padded areas encode the designation:
-# N/L/F/E = present, - = absent.
+# N/L/F/E/P = present, - = absent.
 VER_INFO_STOCK = "T90%s V%1d.%1d.%1d"
 VER_INFO_STOCK_RAW = b"T90%s  V:%1d.%1d.%1d\x00"
 VER_INFO_LETTERS = (("nolie", "N"), ("nologo", "L"), ("fastlcd", "F"),
-                   ("earlykey", "E"))
+                   ("earlykey", "E"), ("fastpd", "P"))
 VER_INFO_MAX_LEN = 24  # string + NUL + the 4 free padding bytes
 VER_INFO_ADR_RD = 1  # fmt pointer is loaded into r1 (adr r1, #imm)
 
@@ -839,7 +906,7 @@ def find_ver_info(payload):
         if idx < 0:
             break
         tail = raw[idx:idx + VER_INFO_MAX_LEN + 8]
-        m = re.match(rb"T90%s {1,2}V:?%1d\.%1d\.%1d([-NLFE]{3,4})?\x00", tail)
+        m = re.match(rb"T90%s {1,2}V:?%1d\.%1d\.%1d([-NLFEP]{3,5})?\x00", tail)
         if m:
             end = idx + m.end()  # just past the NUL
             # Padded dots up to the next pool word must be zeros, and the
@@ -895,7 +962,7 @@ def ver_info_letters(payload, string_off=None):
     if string_off is None:
         return None
     tail = bytes(payload[string_off:string_off + VER_INFO_MAX_LEN + 8])
-    m = re.match(rb"T90%s {1,2}V:?%1d\.%1d\.%1d([-NLFE]{3,4})?\x00", tail)
+    m = re.match(rb"T90%s {1,2}V:?%1d\.%1d\.%1d([-NLFEP]{3,5})?\x00", tail)
     if not m or not m.group(1):
         return None
     return m.group(1).decode()
@@ -914,7 +981,7 @@ def unstamp_ver_info(payload, string_off=None):
         if string_off is None:
             raise ValueError("Ver Info string pattern not found")
     tail = bytes(payload[string_off:string_off + VER_INFO_MAX_LEN + 8])
-    m = re.match(rb"T90%s {1,2}V:?%1d\.%1d\.%1d([-NLFE]{3,4})\x00", tail)
+    m = re.match(rb"T90%s {1,2}V:?%1d\.%1d\.%1d([-NLFEP]{3,5})\x00", tail)
     if not m or not m.group(1):
         raise ValueError(f"Ver Info string holds no stamp: {tail[:24]!r}")
     payload[string_off:string_off + len(VER_INFO_STOCK_RAW)] = \
@@ -927,14 +994,16 @@ def unstamp_ver_info(payload, string_off=None):
     return VER_INFO_STOCK_RAW[:-1].decode()
 
 
-def ver_info_expected_letters(nolie, nologo, fastlcd, earlykey="stock"):
+def ver_info_expected_letters(nolie, nologo, fastlcd, earlykey="stock",
+                              fastpd="stock"):
     """Designation letters for a patch set ('-' = patch absent)."""
     letters = dict(VER_INFO_LETTERS)
     return "".join(
         letters[patch] if state == "patched" else "-"
         for patch, state in (
             ("nolie", nolie), ("nologo", nologo),
-            ("fastlcd", fastlcd), ("earlykey", earlykey)
+            ("fastlcd", fastlcd), ("earlykey", earlykey),
+            ("fastpd", fastpd)
         )
     )
 
@@ -1349,13 +1418,98 @@ def find_earlykey(payload):
 
 
 # Patch names selectable via --only (comma-separated, in one flag).
-PATCH_NAMES = ("nolie", "nologo", "fastlcd", "earlykey")
+PATCH_NAMES = ("nolie", "nologo", "fastlcd", "earlykey", "fastpd")
 # Patches applied by default. earlykey is excluded: hardware testing
 # (T90B) showed no improvement in start-button response and spontaneous
 # reboots during heat-up with it applied (reboots gone without it).
 # Cause not yet isolated - earlykey stays opt-in via --only until
 # hardware-validated. Detectors still recognize already-patched images.
-DEFAULT_PATCHES = ("nolie", "nologo", "fastlcd")
+# fastpd IS default: it trims only dead waiting (no code redirection),
+# keeps the voltage-stability settle, and self-corrects on re-evaluation.
+DEFAULT_PATCHES = ("nolie", "nologo", "fastlcd", "fastpd")
+
+
+# CH224Q PD-settle pre-wait: the 20 ms charger task counts passes before
+# its first detect (v1.1.6: 100 passes = 2.0 s of blank screen with a
+# dead button), then needs 31/41 consecutive stable reads. Shape:
+#     ldr r0, [pc, #imm]; ldrh r0, [r0]; adds r0, #1; uxth r0, r0;
+#     ldr r1, [pc, #imm]; strh r0, [r1]; cmp r0, #<passes>; bge <on>;
+#     [b <return>;] movs r0, #0; ldr r1, [pc, #imm]; strh r0, [r1]
+# Only the cmp immediate is patched (100 -> 5 passes = 100 ms, still
+# covering the CH224 power-on reset). v1.1.4/v1.1.5 have no such counter
+# (their task settles the link directly), so the finder reports "absent"
+# there and the patch skips instead of failing.
+PD_PREWAIT_ORIG = 100
+PD_PREWAIT_NEW = 5
+# movw r0, #0x1388 (5000 mV profile label): marks the PD settle task's
+# presence even where the pre-wait counter is absent.
+PD_TASK_ANCHOR = bytes([0x41, 0xF2, 0x88, 0x30])
+
+
+def _pd_prewait_offsets(payload, imm):
+    """Payload offsets of the pre-wait `cmp r0, #imm` halfword.
+
+    The two ldr-literal opcodes vary by firmware build (pool layout), so
+    only their classes are matched; every fixed halfword around them
+    must fit, including the bge that closes the gate and the
+    counter-reset (movs/strh) that opens the detect path.
+    """
+    raw = bytes(payload)
+    n = len(raw)
+    hits = []
+    for off in range(0, n - 24, 2):
+        if raw[off + 1] != 0x48:  # ldr r0, [pc, #imm]
+            continue
+        if raw[off + 2] != 0x00 or raw[off + 3] != 0x88:  # ldrh r0, [r0]
+            continue
+        if raw[off + 4] != 0x40 or raw[off + 5] != 0x1C:  # adds r0, #1
+            continue
+        if raw[off + 6] != 0x80 or raw[off + 7] != 0xB2:  # uxth r0, r0
+            continue
+        if raw[off + 9] != 0x49:  # ldr r1, [pc, #imm]
+            continue
+        if raw[off + 10] != 0x08 or raw[off + 11] != 0x80:  # strh r0, [r1]
+            continue
+        if raw[off + 12] != imm or raw[off + 13] != 0x28:  # cmp r0, #imm
+            continue
+        hw = raw[off + 14] | (raw[off + 15] << 8)
+        if (hw & 0xF000) != 0xD000 or ((hw >> 8) & 0xF) != 0xA:  # bge
+            continue
+        pos = off + 16
+        tail = raw[pos] | (raw[pos + 1] << 8)
+        if (tail & 0xF800) == 0xE000:  # optional b <return> on miss
+            pos += 2
+        if raw[pos] != 0x00 or raw[pos + 1] != 0x20:  # movs r0, #0
+            continue
+        if raw[pos + 3] != 0x49:  # ldr r1, [pc, #imm]
+            continue
+        if raw[pos + 4] != 0x08 or raw[pos + 5] != 0x80:  # strh r0, [r1]
+            continue
+        hits.append(off + 12)
+    return hits
+
+
+def find_pd_prewait(payload):
+    """Locate the PD pre-wait counter compare.
+
+    Returns (state, cmp_offset): "stock" (100 passes), "patched"
+    (5 passes), "absent" (no counter in this firmware), or "unknown"
+    (ambiguous - fail closed, do not patch).
+    """
+    stock = _pd_prewait_offsets(payload, PD_PREWAIT_ORIG)
+    patched = _pd_prewait_offsets(payload, PD_PREWAIT_NEW)
+    if len(stock) == 1 and not patched:
+        return ("stock", stock[0])
+    if len(patched) == 1 and not stock:
+        return ("patched", patched[0])
+    if not stock and not patched:
+        return ("absent", None)
+    return ("unknown", None)
+
+
+def find_pd_task(payload):
+    """True when the PD settle task is present (any version)."""
+    return bytes(payload).find(PD_TASK_ANCHOR) >= 0
 
 
 def _parse_only(value):
@@ -1408,10 +1562,12 @@ Image base: 0x08005000 (Cortex-M4F)
   fastlcd  shorten the LCD init waits (100,100,200 ms -> 70,70,120 ms)
   earlykey capture keypresses during boot waits (EXPERIMENTAL, opt-in:
            hardware test showed no benefit + reboots; see README)
+  fastpd   shorten the PD pre-wait (100x20 ms -> 5 passes, v1.1.6 only;
+           no-op on versions without the counter)
 
 every patch run also stamps the Ver Info screen (menu 16):
-  N/L/F/E = patch present, '-' = absent (e.g. 'T90A V1.1.4NLFE',
-  default run stamps 'NLF-')""",
+  N/L/F/E/P = patch present, '-' = absent (e.g. 'T90A V1.1.4NLFEP',
+  default run stamps 'NLFP-')""",
     )
     parser_patch.add_argument("file", help="Input .atk firmware file")
     parser_patch.add_argument("output", nargs="?", help="Output .atk file (optional)")
@@ -1420,7 +1576,7 @@ every patch run also stamps the Ver Info screen (menu 16):
         "--only", action="append", type=_parse_only, default=None,
         metavar="PATCH[,PATCH]",
         help="Apply only the selected patches, comma-separated "
-             "(default: nolie,nologo,fastlcd; earlykey is opt-in)",
+             "(default: nolie,nologo,fastlcd,fastpd; earlykey is opt-in)",
     )
     selector.add_argument(
         "--skip", action="append", type=_parse_only, default=None,

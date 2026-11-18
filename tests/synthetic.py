@@ -15,6 +15,7 @@ Payload map (matches the tool's scan behaviour):
     0x0460  SLPOUT..DISPON cluster with movs r0,#200; bl delay_ms
     0x04A0  logo animation init with all 8 verified neighbours
     0x04C0  'lie' function (8-halfword signature, BNE at slot 6)
+    0x0500  PD pre-wait counter (cmp r0,#100; bge) + task anchor
     0x0600  13 more `movs r0,#imm; bl delay_ms` callers (16 total,
             as in the real firmware - fastlcd counts on there being
             only one 100/100 adjacent pair)
@@ -88,8 +89,36 @@ VER_INFO_STAMP_OFFSET = VER_INFO_OFFSET + len(VER_INFO_STOCK.encode())
 # Vendor spelling on real firmware (double space + colon).
 VER_INFO_VENDOR = "T90%s  V:%1d.%1d.%1d"
 VER_INFO_LETTERS = (("nolie", "N"), ("nologo", "L"), ("fastlcd", "F"),
-                      ("earlykey", "E"))
+                      ("earlykey", "E"), ("fastpd", "P"))
 VER_INFO_STATES = ("stock", "patched")
+
+# --- fastpd (PD pre-wait counter) ----------------------------------------
+# v1.1.6 shape: ldr/ldrh/adds/uxth/ldr/strh/cmp #imm/bge/[b]/movs/ldr/
+# strh + the movw #0x1388 task anchor; 28 bytes total. v1.1.4/v1.1.5
+# ("absent") keep only the anchor, emulating a PD task without the
+# counter. Must avoid the earlykey delay-caller field (0x0600+).
+PD_OFFSET = 0x0500
+PD_BLOCK_LEN = 28
+
+
+def pd_prewait_bytes(wait=100):
+    """PD pre-wait counter block with the given pass threshold."""
+    out = bytearray()
+    out += struct.pack("<H", 0x4810)   # ldr r0, [pc, #imm]
+    out += bytes([0x00, 0x88])         # ldrh r0, [r0]
+    out += bytes([0x40, 0x1C])         # adds r0, #1
+    out += bytes([0x80, 0xB2])         # uxth r0, r0
+    out += struct.pack("<H", 0x490E)   # ldr r1, [pc, #imm]
+    out += bytes([0x08, 0x80])         # strh r0, [r1]
+    out += struct.pack("<H", 0x2800 | wait)  # cmp r0, #wait
+    out += bytes([0x00, 0xDA])         # bge <on>
+    out += struct.pack("<H", 0xE003)   # b <past the reset> (miss path)
+    out += bytes([0x00, 0x20])         # movs r0, #0
+    out += struct.pack("<H", 0x490C)   # ldr r1, [pc, #imm]
+    out += bytes([0x08, 0x80])         # strh r0, [r1]
+    out += bytes(tool.PD_TASK_ANCHOR)  # movw r0, #0x1388 (task marker)
+    assert len(out) == PD_BLOCK_LEN
+    return bytes(out)
 
 # --- earlykey ------------------------------------------------------------
 KEYSCAN_OFFSET = 0x0640    # key-scan routine entry (PUSH before anchor)
@@ -120,10 +149,10 @@ DECOY_LOGO_OFFSET = 0x1000  # stray 6F F0 26 04 with wrong neighbours
 
 
 def ver_info_stamped(nolie="stock", nologo="stock", fastlcd="stock",
-                   earlykey="stock"):
+                   earlykey="stock", fastpd="stock"):
     """Ver Info format string with the designation letters for a patch set.
 
-    Returns the full ASCII string (no NUL), e.g. 'T90%s V%1d.%1d.%1dNLFE'.
+    Returns the full ASCII string (no NUL), e.g. 'T90%s V%1d.%1d.%1dNLFEP'.
     '-' marks a patch that is not present.  Raises KeyError on an
     unknown patch state (guards against builder/tool skew).
     Earlykey accepts 'clean' as an alias for 'stock' (its detector
@@ -132,7 +161,7 @@ def ver_info_stamped(nolie="stock", nologo="stock", fastlcd="stock",
     if earlykey == "clean":
         earlykey = "stock"
     states = {"nolie": nolie, "nologo": nologo, "fastlcd": fastlcd,
-              "earlykey": earlykey}
+              "earlykey": earlykey, "fastpd": fastpd}
     unknown = [s for s in states.values() if s not in VER_INFO_STATES]
     if unknown:
         raise KeyError(f"unknown patch state: {unknown[0]!r}")
@@ -261,14 +290,17 @@ def lcd_init_bytes(wait_a=100, wait_b=100, wait_c=200):
 
 
 def build_payload(version_int=116, nolie="stock", nologo="stock",
-                  fastlcd="stock", earlykey="clean", verinfo="auto",
-                  decoys=True):
+                  fastlcd="stock", earlykey="clean", fastpd="stock",
+                  verinfo="auto", decoys=True):
     """Build a decrypted firmware payload.
 
     nolie/nologo/fastlcd: 'stock' or 'patched'.  fastlcd additionally
     accepts 'ambiguous' (a second 100/100 delay pair -> tool refuses).
     earlykey: 'clean' (callers target delay_ms directly) or 'patched'
     (callers redirected to a valid cave, as build_earlykey_cave makes).
+    fastpd: 'stock' (pre-wait counter at 100 passes), 'patched' (5
+    passes), or 'absent' (task anchor only, emulating v1.1.4/v1.1.5
+    which settle the PD link without a pre-wait counter).
     version_int: self-check immediate (114/115/116), or None to omit
     the pattern entirely.
     verinfo: 'auto' (stock string on stock builds, stamped on patched
@@ -325,6 +357,20 @@ def build_payload(version_int=116, nolie="stock", nologo="stock",
     elif earlykey != "clean":
         raise ValueError(f"earlykey must be 'clean' or 'patched', got {earlykey!r}")
 
+    # PD pre-wait counter (v1.1.6 shape) or task anchor only
+    # (v1.1.4/v1.1.5 shape: no counter, nothing to shorten).
+    if fastpd == "stock":
+        p[PD_OFFSET:PD_OFFSET + PD_BLOCK_LEN] = pd_prewait_bytes(100)
+    elif fastpd == "patched":
+        p[PD_OFFSET:PD_OFFSET + PD_BLOCK_LEN] = pd_prewait_bytes(
+            tool.PD_PREWAIT_NEW)
+    elif fastpd == "absent":
+        p[PD_OFFSET + PD_BLOCK_LEN - 4:PD_OFFSET + PD_BLOCK_LEN] = \
+            bytes(tool.PD_TASK_ANCHOR)
+    else:
+        raise ValueError(f"fastpd must be 'stock', 'patched' or "
+                         f"'absent', got {fastpd!r}")
+
     # Version self-check inside the scanned code region
     if version_int is not None:
         p[VER_OFFSET:VER_OFFSET + 6] = version_check_bytes(version_int)
@@ -337,8 +383,9 @@ def build_payload(version_int=116, nolie="stock", nologo="stock",
     # pool words and every code address stay byte-identical.
     if verinfo == "auto":
         ek_state = "patched" if earlykey == "patched" else "stock"
-        any_patched = "patched" in (nolie, nologo, fastlcd, ek_state)
-        body = ver_info_stamped(nolie, nologo, fastlcd, ek_state) \
+        any_patched = "patched" in (nolie, nologo, fastlcd, ek_state,
+                                    fastpd)
+        body = ver_info_stamped(nolie, nologo, fastlcd, ek_state, fastpd) \
             if any_patched else VER_INFO_VENDOR
     elif verinfo == "stock":
         body = VER_INFO_VENDOR

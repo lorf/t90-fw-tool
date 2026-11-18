@@ -17,7 +17,7 @@ This writes `t90_v<version>_nolie_nologo_fastlcd_fastpd.atk` — the patched fir
 This tool supports three operations on `.atk` firmware files:
 - **info**: Display firmware header, vector table, extracted firmware version, and patch status
 - **extract**: Strip the header and decrypt the firmware payload to a raw `.bin` file
-- **patch**: Apply the "nolie" temperature display patch, the "nologo" boot logo skip, the "fastlcd" LCD-timing trim, and the "fastpd" PD-settle pre-wait trim ("earlykey" boot key-capture is experimental, opt-in only); every run also stamps the patch designation onto the "Ver Info" screen
+- **patch**: Apply the "nolie" temperature display patch, the "nologo" boot logo skip, the "fastlcd" LCD-timing trim, and the "fastpd" PD-settle pre-wait trim ("earlykey" boot key-capture and "fastsettle" PD-settle trim are opt-in only); every run also stamps the patch designation onto the "Ver Info" screen
 
 > **Note:** The `app_ver` field in the firmware header is always `1.0.01` regardless of the actual version. The real firmware version is extracted from a Thumb self-check pattern in the decrypted payload, and falls back to the filename if the pattern is not found.
 
@@ -109,6 +109,26 @@ python3 t90_fw_tool.py patch --only fastpd t90.atk   # -> t90_v1.1.6_fastpd.atk
 v1.1.4/v1.1.5 settle the PD link without this counter, so there the patch
 is a no-op ("not applicable") rather than an error.
 
+### The "Fastsettle" Patch (opt-in until hardware-validated)
+
+After `fastpd`, the remaining ~0.6–0.8 s of blank screen is the same
+charger task's stability settle: 31 or 41 consecutive stable reads
+(`cmp r0, #0x1E` / `#0x28`, one 20 ms pass each) before the
+voltage-profile request goes out, depending on the charger response
+path. The "fastsettle" patch halves both thresholds (16/21 passes),
+saving ~300–400 ms. Unlike the dead pre-wait, this settle debounces the
+charger link, so the patch stays opt-in until validated on several
+chargers and PD/DC supplies:
+
+```bash
+python3 t90_fw_tool.py patch --only fastsettle t90.atk   # -> t90_v1.1.6_fastsettle.atk
+```
+
+Same counter shape on all three versions (found via the `movw #0x1388`
+profile label), so unlike `fastpd` it applies everywhere. A wrong early
+profile request self-corrects on the next heater-path re-evaluation,
+but if the charger ever mis-negotiates on cold plug, reflash without it.
+
 ### The "Earlykey" Patch (EXPERIMENTAL — do not use yet)
 
 > **Hardware test result (T90B): with `earlykey` applied, the start-heating button still has no effect for ~1 s after power-up, and spontaneous reboots occur during heat-up (stable again at target temp; reboots gone after reflashing without `earlykey`).** The patch is therefore **not applied by default** and stays opt-in (`--only earlykey`) until the cause is isolated. The `info` command still detects images that already contain it.
@@ -188,6 +208,8 @@ Size: 104461 bytes (header: 13 + payload: 104448)
   nolie:    not patched (BNE at payload offset 0x820A, ARM 0x0800D20A)
   nologo:   not patched (mvn.w r4, #0x26 at payload offset 0x0FB84, ARM 0x08014B84)
   fastlcd:  not patched (LCD waits: 100 ms, 100 ms, 200 ms)
+  fastpd:   not patched (PD pre-wait 100 passes at payload offset 0x0A0D4, ARM 0x0800F0D4)
+  fastsettle: not patched (PD settle 31/41 passes at payload offsets 0x0A11A, 0x0A168)
   verinfo:  '(none)' on the Ver Info screen (menu 16, payload offset 0x11814)
   earlykey: not patched (key-scan at payload offset 0x0C3D8, ARM 0x080113D8)
 ```
@@ -237,7 +259,7 @@ LCD wait at payload offset 0x050BC (ARM 0x0800A0BC): movs r0, #200 -> movs r0, #
   Patched to: LCD waits [70, 70, 120] ms (saves ~140 ms of boot time)
 PD pre-wait counter at payload offset 0x0A0D4 (ARM 0x0800F0D4): cmp r0, #100 -> cmp r0, #5
   Patched to: PD pre-wait 5 passes (saves ~1900 ms of blank-screen time)
-Ver Info designation at payload offset 0x11814 (ARM 0x08016814): 'T90%s V%1d.%1d.%1dNLF-P'
+Ver Info designation at payload offset 0x11814 (ARM 0x08016814): 'T90%s%1d.%1d.%1dNLF-P-' (default run)
 
 Patched firmware written to: t90_nolie_nologo_fastlcd_fastpd.atk
   Original size: 104461 bytes
@@ -255,7 +277,7 @@ This writes `t90_v1.1.4_nolie_nologo_fastlcd_fastpd.atk` (auto-inserts the firmw
 
 The output name always reflects every patch present in the written file — including patches the input already contained. Patching a partially patched file therefore never loses track of earlier patches in the name, and old suffixes are never stacked.
 
-To apply only a subset (comma-separated in one flag; the default run equals `--only nolie,nologo,fastlcd,fastpd` — `earlykey` is opt-in only):
+To apply only a subset (comma-separated in one flag; the default run equals `--only nolie,nologo,fastlcd,fastpd` — `earlykey`/`fastsettle` are opt-in only):
 
 ```bash
 python3 t90_fw_tool.py patch --only nolie t90.atk                    # -> t90_v1.1.4_nolie.atk
@@ -275,16 +297,16 @@ python3 t90_fw_tool.py patch --skip fastlcd t90.atk                  # -> t90_v1
 Menu item 16 shows the model variant and firmware version from the
 format string `T90%s  V:%1d.%1d.%1d`. Every patch run also stamps a
 one-letter-per-patch designation onto that line: `N` = nolie,
-`L` = nologo, `F` = fastlcd, `E` = earlykey, `P` = fastpd, `-` = absent —
-e.g. `T90A V1.1.4NLFEP` for a fully patched build, `T90A V1.1.4NLF-P` for
-the default run on v1.1.6 (`NLF--` where the counter is absent),
-`T90A V1.1.4N----` for nolie only. The
-stamp collapses the vendor's double space to one, drops the colon,
-and writes the letters into padding bytes inside the existing string
-footprint, so no address moves and the file size is unchanged. `info`
-reports the stamp as `verinfo:  'NLF-P'` for the default run
-(`NLFEP` with `--only nolie,nologo,fastlcd,earlykey,fastpd`); stock firmware
-shows `(none)`.
+`L` = nologo, `F` = fastlcd, `E` = earlykey, `P` = fastpd,
+`S` = fastsettle, `-` = absent — e.g. `T90A1.1.4NLFEPS` for a fully
+patched build, `T90A1.1.4NLF-P-` for the default run, `T90A1.1.4N-----`
+for nolie only. The stamp drops the vendor's " V" separator and writes
+the letters into padding bytes inside the existing string footprint, so
+no address moves and the file size is unchanged (the 16-char base leaves
+room for a 7th letter). `info` reports the stamp as
+`verinfo:  'NLF-P-'` for the default run
+(`NLFEPS` with `--only nolie,nologo,fastlcd,earlykey,fastpd,fastsettle`);
+stock firmware shows `(none)`.
 
 ## References
 

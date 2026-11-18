@@ -83,13 +83,14 @@ DISPON_OFFSET = 0x046C     # movs r0, #0x29
 #     next pool word, referenced by exactly one PC-relative ADR).
 VER_INFO_OFFSET = 0x1200  # payload offset of the format string
 VER_INFO_ADR_DELTA = 0x80  # adr -> string delta, as on real firmware
-# Stamped shape: single space, no colon, then the letters.
-VER_INFO_STOCK = "T90%s V%1d.%1d.%1d"
+# Stamped shape: no " V" separator, then the letters (room for 8).
+VER_INFO_STOCK = "T90%s%1d.%1d.%1d"
 VER_INFO_STAMP_OFFSET = VER_INFO_OFFSET + len(VER_INFO_STOCK.encode())
 # Vendor spelling on real firmware (double space + colon).
 VER_INFO_VENDOR = "T90%s  V:%1d.%1d.%1d"
 VER_INFO_LETTERS = (("nolie", "N"), ("nologo", "L"), ("fastlcd", "F"),
-                      ("earlykey", "E"), ("fastpd", "P"))
+                      ("earlykey", "E"), ("fastpd", "P"),
+                      ("fastsettle", "S"))
 VER_INFO_STATES = ("stock", "patched")
 
 # --- fastpd (PD pre-wait counter) ----------------------------------------
@@ -118,6 +119,30 @@ def pd_prewait_bytes(wait=100):
     out += bytes([0x08, 0x80])         # strh r0, [r1]
     out += bytes(tool.PD_TASK_ANCHOR)  # movw r0, #0x1388 (task marker)
     assert len(out) == PD_BLOCK_LEN
+    return bytes(out)
+
+
+# --- fastsettle (PD stability thresholds) -------------------------------
+# Same counter prefix as the pre-wait, closed by BLE (keep settling).
+# Real firmware: cmp r0,#0x1E (31 passes, bit #0x10 path) and
+# cmp r0,#0x28 (41 passes, bit #0x08 path); patched halves both.
+SETTLE_A_OFFSET = 0x0540
+SETTLE_B_OFFSET = 0x0560
+SETTLE_BLOCK_LEN = 16
+
+
+def settle_bytes(wait):
+    """PD settle counter block with the given pass threshold."""
+    out = bytearray()
+    out += struct.pack("<H", 0x4810)   # ldr r0, [pc, #imm]
+    out += bytes([0x00, 0x88])         # ldrh r0, [r0]
+    out += bytes([0x40, 0x1C])         # adds r0, #1
+    out += bytes([0x80, 0xB2])         # uxth r0, r0
+    out += struct.pack("<H", 0x490E)   # ldr r1, [pc, #imm]
+    out += bytes([0x08, 0x80])         # strh r0, [r1]
+    out += struct.pack("<H", 0x2800 | wait)  # cmp r0, #wait
+    out += bytes([0x05, 0xDD])         # ble <tail>
+    assert len(out) == SETTLE_BLOCK_LEN
     return bytes(out)
 
 # --- earlykey ------------------------------------------------------------
@@ -149,10 +174,10 @@ DECOY_LOGO_OFFSET = 0x1000  # stray 6F F0 26 04 with wrong neighbours
 
 
 def ver_info_stamped(nolie="stock", nologo="stock", fastlcd="stock",
-                   earlykey="stock", fastpd="stock"):
+                   earlykey="stock", fastpd="stock", fastsettle="stock"):
     """Ver Info format string with the designation letters for a patch set.
 
-    Returns the full ASCII string (no NUL), e.g. 'T90%s V%1d.%1d.%1dNLFEP'.
+    Returns the full ASCII string (no NUL), e.g. 'T90%s%1d.%1d.%1dNLFEPS'.
     '-' marks a patch that is not present.  Raises KeyError on an
     unknown patch state (guards against builder/tool skew).
     Earlykey accepts 'clean' as an alias for 'stock' (its detector
@@ -161,7 +186,8 @@ def ver_info_stamped(nolie="stock", nologo="stock", fastlcd="stock",
     if earlykey == "clean":
         earlykey = "stock"
     states = {"nolie": nolie, "nologo": nologo, "fastlcd": fastlcd,
-              "earlykey": earlykey, "fastpd": fastpd}
+              "earlykey": earlykey, "fastpd": fastpd,
+              "fastsettle": fastsettle}
     unknown = [s for s in states.values() if s not in VER_INFO_STATES]
     if unknown:
         raise KeyError(f"unknown patch state: {unknown[0]!r}")
@@ -291,7 +317,7 @@ def lcd_init_bytes(wait_a=100, wait_b=100, wait_c=200):
 
 def build_payload(version_int=116, nolie="stock", nologo="stock",
                   fastlcd="stock", earlykey="clean", fastpd="stock",
-                  verinfo="auto", decoys=True):
+                  fastsettle="stock", verinfo="auto", decoys=True):
     """Build a decrypted firmware payload.
 
     nolie/nologo/fastlcd: 'stock' or 'patched'.  fastlcd additionally
@@ -301,6 +327,8 @@ def build_payload(version_int=116, nolie="stock", nologo="stock",
     fastpd: 'stock' (pre-wait counter at 100 passes), 'patched' (5
     passes), or 'absent' (task anchor only, emulating v1.1.4/v1.1.5
     which settle the PD link without a pre-wait counter).
+    fastsettle: 'stock' (settle thresholds at 31/41 passes) or 'patched'
+    (16/21 passes).
     version_int: self-check immediate (114/115/116), or None to omit
     the pattern entirely.
     verinfo: 'auto' (stock string on stock builds, stamped on patched
@@ -371,6 +399,21 @@ def build_payload(version_int=116, nolie="stock", nologo="stock",
         raise ValueError(f"fastpd must be 'stock', 'patched' or "
                          f"'absent', got {fastpd!r}")
 
+    # PD settle thresholds (same shape on all versions).
+    if fastsettle == "stock":
+        p[SETTLE_A_OFFSET:SETTLE_A_OFFSET + SETTLE_BLOCK_LEN] = \
+            settle_bytes(tool.PD_SETTLE_ORIG[0])
+        p[SETTLE_B_OFFSET:SETTLE_B_OFFSET + SETTLE_BLOCK_LEN] = \
+            settle_bytes(tool.PD_SETTLE_ORIG[1])
+    elif fastsettle == "patched":
+        p[SETTLE_A_OFFSET:SETTLE_A_OFFSET + SETTLE_BLOCK_LEN] = \
+            settle_bytes(tool.PD_SETTLE_NEW[0])
+        p[SETTLE_B_OFFSET:SETTLE_B_OFFSET + SETTLE_BLOCK_LEN] = \
+            settle_bytes(tool.PD_SETTLE_NEW[1])
+    else:
+        raise ValueError(f"fastsettle must be 'stock' or 'patched', "
+                         f"got {fastsettle!r}")
+
     # Version self-check inside the scanned code region
     if version_int is not None:
         p[VER_OFFSET:VER_OFFSET + 6] = version_check_bytes(version_int)
@@ -384,8 +427,9 @@ def build_payload(version_int=116, nolie="stock", nologo="stock",
     if verinfo == "auto":
         ek_state = "patched" if earlykey == "patched" else "stock"
         any_patched = "patched" in (nolie, nologo, fastlcd, ek_state,
-                                    fastpd)
-        body = ver_info_stamped(nolie, nologo, fastlcd, ek_state, fastpd) \
+                                    fastpd, fastsettle)
+        body = ver_info_stamped(nolie, nologo, fastlcd, ek_state, fastpd,
+                                fastsettle) \
             if any_patched else VER_INFO_VENDOR
     elif verinfo == "stock":
         body = VER_INFO_VENDOR

@@ -37,13 +37,20 @@ FASTLCD_BYTES = {
     synthetic.WAIT_A_OFFSET, synthetic.WAIT_B_OFFSET, synthetic.WAIT_C_OFFSET
 }
 FASTPD_BYTES = {synthetic.PD_OFFSET + 12}  # cmp r0,#100 -> cmp r0,#5
+SETTLE_BYTES = {  # cmp r0,#30 -> #15 and cmp r0,#40 -> #20
+    synthetic.SETTLE_A_OFFSET + 12, synthetic.SETTLE_B_OFFSET + 12
+}
 # Ver Info designation: stock 'T90%s  V:%1d.%1d.%1d' (20 chars) ->
-# stamped 'T90%s V%1d.%1d.%1d<letters>' (23 chars + NUL). Bytes 0..5
-# are identical, then the collapsed space, dropped colon, shifted tail
-# and 5 letters differ (rel 6..22); the relocated NUL lands on old zero
-# padding, and the pool word after the window is untouched.
-VER_BYTES = set(range(synthetic.VER_INFO_OFFSET + 6,
-                      synthetic.VER_INFO_OFFSET + 23))
+# stamped 'T90%s%1d.%1d.%1d<letters>' (22 chars + NUL for 6 letters).
+# Bytes 0..4 are identical; rel 5..8 differ (the dropped " V:" prefix
+# vs the version digits), rel 9..15 are identical (shared digits), and
+# rel 16..21 differ (letters vs tail digits/NUL/padding). The relocated
+# NUL lands on old zero padding, and the pool word after the window is
+# untouched.
+VER_BYTES = {
+    synthetic.VER_INFO_OFFSET + rel
+    for rel in (5, 6, 7, 8, 16, 17, 18, 19, 20, 21)
+}
 
 
 # --- info ------------------------------------------------------------------
@@ -58,6 +65,7 @@ def test_info_stock(atk_file, cli):
     assert "nologo:   not patched" in out
     assert "fastlcd:  not patched (LCD waits: 100 ms, 100 ms, 200 ms)" in out
     assert "fastpd:   not patched" in out
+    assert "fastsettle: not patched" in out
     assert "earlykey: not patched" in out
     assert f"0x{synthetic.KEYSCAN_OFFSET:05X}" in out  # key-scan offset shown
     assert "File size matches bin_size + header" in out
@@ -68,7 +76,7 @@ def test_info_stock(atk_file, cli):
 def test_info_patched(atk_file, cli):
     path = atk_file(payload=synthetic.build_payload(
         nolie="patched", nologo="patched", fastlcd="patched",
-        fastpd="patched",
+        fastpd="patched", fastsettle="patched",
     ))
     code, out, err = cli("info", path)
     assert code == 0
@@ -76,6 +84,7 @@ def test_info_patched(atk_file, cli):
     assert "nologo:   already patched" in out
     assert "fastlcd:  already patched (LCD waits: 70 ms, 70 ms, 120 ms)" in out
     assert "fastpd:   already patched" in out
+    assert "fastsettle: already patched" in out
 
 
 def test_info_earlykey_patched(atk_file, cli):
@@ -120,6 +129,7 @@ def test_info_unknown_patterns(atk_file, cli):
     assert "nologo:   unknown" in out
     assert "fastlcd:  unknown" in out
     assert "fastpd:   unknown" in out
+    assert "fastsettle: unknown" in out
 
 
 def test_info_bad_dev_type(atk_file, cli):
@@ -226,7 +236,7 @@ def test_patch_all(atk_file, tmp_path, cli):
     assert "fastlcd:  already patched" in out2
     assert "fastpd:   already patched" in out2
     assert "version:   1.1.6" in out2
-    assert "verinfo:  'NLF-P'" in out2
+    assert "verinfo:  'NLF-P-'" in out2
 
     # Patched output is valid XOR of the payload (re-encrypt sanity).
     assert tool.xor_decrypt(patched[13:]) == new_p
@@ -296,7 +306,7 @@ def test_patch_only_fastpd(atk_file, tmp_path, cli):
     diffs = set(payload_diff_offsets(payload_of(read(path)),
                                      payload_of(read(out_path))))
     assert diffs == FASTPD_BYTES | VER_BYTES
-    assert tool.ver_info_letters(payload_of(read(out_path))) == "----P"
+    assert tool.ver_info_letters(payload_of(read(out_path))) == "----P-"
     code, info, _ = cli("info", str(out_path))
     assert "fastpd:   already patched" in info
 
@@ -309,6 +319,55 @@ def test_patch_fastpd_absent_skips(atk_file, tmp_path, cli):
     assert "not applicable" in out
     out_path = tmp_path / "t90_v1.1.6.atk"
     assert out_path.exists(), out
+
+
+def test_patch_only_fastsettle(atk_file, tmp_path, cli):
+    path = atk_file()
+    code, out, err = cli("patch", "--only", "fastsettle", path)
+    assert code == 0, err
+    out_path = tmp_path / "t90_v1.1.6_fastsettle.atk"
+    assert out_path.exists(), out
+    diffs = set(payload_diff_offsets(payload_of(read(path)),
+                                     payload_of(read(out_path))))
+    assert diffs == SETTLE_BYTES | VER_BYTES
+    assert tool.ver_info_letters(payload_of(read(out_path))) == "-----S"
+    code, info, _ = cli("info", str(out_path))
+    assert "fastsettle: already patched" in info
+    # The pre-wait counter next door is untouched.
+    new_p = payload_of(read(out_path))
+    assert tool.find_pd_prewait(new_p)[0] == "stock"
+
+
+def test_patch_fastsettle_idempotent(atk_file, tmp_path, cli):
+    path = atk_file(payload=synthetic.build_payload(fastsettle="patched"),
+                    name="t90_v1.1.6_fastsettle.atk")
+    before = read(path)
+    code, out, err = cli("patch", "--only", "fastsettle", path)
+    assert code == 0, err
+    assert "already shortened" in out
+    assert read(tmp_path / "t90_v1.1.6_fastsettle.atk") == before
+
+
+def test_patch_fastsettle_ambiguous_refused(atk_file, cli):
+    payload = bytearray(synthetic.build_payload())
+    # Duplicate settle block A: two cmp r0,#30 sites -> fail closed.
+    payload[0x0580:0x0580 + synthetic.SETTLE_BLOCK_LEN] = \
+        synthetic.settle_bytes(30)
+    path = atk_file(payload=bytes(payload))
+    code, _, err = cli("patch", "--only", "fastsettle", path)
+    assert code == 1
+    assert "PD settle threshold pattern not found" in err
+
+
+def test_patch_fastsettle_absent_errors(atk_file, cli):
+    payload = bytearray(synthetic.build_payload())
+    for off in (synthetic.SETTLE_A_OFFSET, synthetic.SETTLE_B_OFFSET):
+        payload[off:off + synthetic.SETTLE_BLOCK_LEN] = bytes(
+            synthetic.SETTLE_BLOCK_LEN)
+    path = atk_file(payload=bytes(payload))
+    code, _, err = cli("patch", "--only", "fastsettle", path)
+    assert code == 1
+    assert "PD settle threshold pattern not found" in err
 
 
 def test_patch_fastpd_ambiguous_refused(atk_file, cli):
@@ -357,7 +416,7 @@ def test_patch_only_earlykey(atk_file, tmp_path, cli):
                                      payload_of(read(out_path))))
     assert diffs == earlykey_diff_bytes(payload_of(read(path)),
                                         payload_of(read(out_path))) | VER_BYTES
-    assert tool.ver_info_letters(payload_of(read(out_path))) == "---E-"
+    assert tool.ver_info_letters(payload_of(read(out_path))) == "---E--"
     # The cave landed at the expected offset, others untouched.
     new_p = payload_of(read(out_path))
     assert new_p[synthetic.CAVE_OFF:synthetic.CAVE_OFF + synthetic.CAVE_LEN] != bytes(
@@ -592,7 +651,7 @@ def test_parse_only_accepts_valid():
     assert tool._parse_only("nolie, nologo") == ["nolie", "nologo"]
     assert tool._parse_only("nolie,nologo,fastlcd") == ["nolie", "nologo", "fastlcd"]
     assert tool._parse_only("fastpd") == ["fastpd"]
-    assert tool._parse_only("nolie,nologo,fastlcd,earlykey,fastpd") == list(tool.PATCH_NAMES)
+    assert tool._parse_only("nolie,nologo,fastlcd,earlykey,fastpd,fastsettle") == list(tool.PATCH_NAMES)
 
 
 def test_parse_only_rejects_unknown():
@@ -605,13 +664,15 @@ def test_parse_only_rejects_unknown():
 
 
 def test_patch_names_constant():
-    assert tool.PATCH_NAMES == ("nolie", "nologo", "fastlcd", "earlykey", "fastpd")
+    assert tool.PATCH_NAMES == ("nolie", "nologo", "fastlcd", "earlykey",
+                                         "fastpd", "fastsettle")
 
 
 def test_default_patches_exclude_earlykey():
-    # earlykey is experimental/opt-in: never in the default set.
+    # earlykey/fastsettle are opt-in: never in the default set.
     assert tool.DEFAULT_PATCHES == ("nolie", "nologo", "fastlcd", "fastpd")
     assert "earlykey" not in tool.DEFAULT_PATCHES
+    assert "fastsettle" not in tool.DEFAULT_PATCHES
 
 
 def test_main_no_command_prints_help(capsys):

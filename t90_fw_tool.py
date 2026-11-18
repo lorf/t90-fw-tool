@@ -26,10 +26,10 @@ panel ever fails to initialize on cold boot.
 
 Menu item 16 "Ver Info" shows the model variant and firmware version.
 Any patch run also stamps a one-letter-per-patch designation onto that
-line (N=nolie, L=nologo, F=fastlcd, E=earlykey, P=fastpd, '-'=absent),
-e.g. 'T90A V1.1.4NLFEP' fully patched, 'T90A V1.1.4NLFP-' default;
-stock firmware keeps the vendor string. The stamp reuses padding
-bytes inside the existing string footprint, so no address moves.
+line (N=nolie, L=nologo, F=fastlcd, E=earlykey, P=fastpd, S=fastsettle,
+'-'=absent), e.g. 'T90A1.1.4NLFEPS' fully patched, 'T90A1.1.4NLF-P-'
+default; stock firmware keeps the vendor string. The stamp reuses
+padding bytes inside the existing string footprint, so no address moves.
 
 The "fastpd" patch shortens the CH224Q PD-settle pre-wait (100x20 ms
 passes -> 5 passes), saving ~1.9 s of blank-screen time with a dead
@@ -39,6 +39,14 @@ voltage-profile request is left intact, and a wrong early request
 self-corrects on the next heater-path re-evaluation. Present only on
 firmwares with the pre-wait counter (v1.1.6); older versions settle
 without it, so the patch reports "not applicable" there and skips.
+
+The "fastsettle" patch halves the CH224Q PD-settle stability thresholds
+(31/41 consecutive stable reads -> 16/21), saving ~300-400 ms of
+blank-screen time with a dead button at boot. Unlike the dead pre-wait,
+the settle debounces the charger link before the voltage-profile
+request, so this patch stays opt-in (--only fastsettle) until
+hardware-validated on several chargers. Present on all versions with
+the same shape (v1.1.4/v1.1.5/v1.1.6).
 
 The "earlykey" patch captures keypresses during boot waits: all
 delay_ms() callers are redirected to a polling-delay routine in an
@@ -253,6 +261,21 @@ def cmd_info(args):
                   f"unsupported firmware version?)")
     else:
         print(f"  fastpd:   unknown (ambiguous PD pre-wait pattern - "
+              f"unsupported firmware version?)")
+
+    st_state, st_offs = find_pd_settle(payload)
+    if st_state == "stock":
+        o = ", ".join(f"0x{off:05X}" for off in st_offs)
+        print(f"  fastsettle: not patched (PD settle 31/41 passes at payload "
+              f"offsets {o})")
+    elif st_state == "patched":
+        print(f"  fastsettle: already patched (PD settle "
+              f"{PD_SETTLE_NEW[0] + 1}/{PD_SETTLE_NEW[1] + 1} passes)")
+    elif st_state == "absent":
+        print(f"  fastsettle: unknown (PD settle pattern not found - "
+              f"unsupported firmware version?)")
+    else:
+        print(f"  fastsettle: unknown (ambiguous PD settle pattern - "
               f"unsupported firmware version?)")
 
     ver_off = find_ver_info(payload)
@@ -513,9 +536,11 @@ def find_function_location(payload, instruction=None):
 def cmd_patch(args):
     """Apply the selected patches (default: nolie + nologo + fastlcd + fastpd).
 
-    earlykey is experimental and opt-in only (--only earlykey): hardware
-    testing showed no button improvement and spontaneous reboots during
-    heat-up, cause not yet isolated. It is never applied by default.
+    earlykey and fastsettle are opt-in only (--only ...): earlykey is
+    experimental (hardware testing showed no button improvement and
+    spontaneous reboots during heat-up, cause not yet isolated);
+    fastsettle trims a guard that debounces the charger link and awaits
+    hardware validation. Neither is ever applied by default.
     """
     if args.only:
         selected = {p for group in args.only for p in group}
@@ -528,6 +553,7 @@ def cmd_patch(args):
     do_fastlcd = "fastlcd" in selected
     do_earlykey = "earlykey" in selected
     do_fastpd = "fastpd" in selected
+    do_fastsettle = "fastsettle" in selected
 
     with open(args.file, "rb") as f:
         data = bytearray(f.read())
@@ -557,6 +583,8 @@ def cmd_patch(args):
         already.add("earlykey")
     if find_pd_prewait(payload)[0] == "patched":
         already.add("fastpd")
+    if find_pd_settle(payload)[0] == "patched":
+        already.add("fastsettle")
     # fastpd exists only where the PD pre-wait counter exists (v1.1.6);
     # older firmwares settle without it, so there is nothing to shorten.
     na = set()
@@ -706,10 +734,33 @@ def cmd_patch(args):
                       f"(saves ~{(PD_PREWAIT_ORIG - PD_PREWAIT_NEW) * 20} ms "
                       f"of blank-screen time)")
 
+    if do_fastsettle:
+        # Halve the PD stability settle: 31/41 consecutive stable reads
+        # become 16/21 (still hundreds of ms of debounce on each
+        # charger-response bit). Saves ~300-400 ms of blank-screen time.
+        state, cmp_offs = find_pd_settle(new_payload)
+        if cmp_offs is None:
+            print("Error: PD settle threshold pattern not found.", file=sys.stderr)
+            print("  Unsupported firmware version?", file=sys.stderr)
+            return 1
+        elif state == "patched":
+            print(f"PD settle already shortened (patch present).")
+        else:
+            for cmp_off, old, new in zip(cmp_offs, PD_SETTLE_ORIG,
+                                         PD_SETTLE_NEW):
+                arm = 0x08005000 + cmp_off
+                print(f"PD settle threshold at payload offset 0x{cmp_off:05X} "
+                      f"(ARM 0x{arm:08X}): cmp r0, #{old} -> cmp r0, #{new}")
+                struct.pack_into("<H", new_payload, cmp_off, 0x2800 | new)
+            print(f"  Patched to: PD settle "
+                  f"{PD_SETTLE_NEW[0] + 1}/{PD_SETTLE_NEW[1] + 1} passes "
+                  f"(saves ~300-400 ms of blank-screen time, "
+                  f"one path per boot)")
+
     if effective:
         # Stamp the designation letters onto the Ver Info screen: the
-        # string shrinks by one space, drops the colon and grows up to
-        # 5 letters, all inside the existing footprint.  A stamp from an
+        # string drops the " V" separator and grows up to 6 letters,
+        # all inside the existing footprint.  A stamp from an
         # earlier (subset) run is normalized via the stock spelling, so
         # incremental patching just works.  Fail closed on any mismatch.
         ver_off = find_ver_info(new_payload)
@@ -754,7 +805,8 @@ def cmd_patch(args):
         print("Error: no patches selected.", file=sys.stderr)
         return 1
     suffix = ""
-    for name in ("nolie", "nologo", "fastlcd", "earlykey", "fastpd"):
+    for name in ("nolie", "nologo", "fastlcd", "earlykey", "fastpd",
+                 "fastsettle"):
         if name in effective:
             suffix += "_" + name
     # Determine output file
@@ -770,7 +822,7 @@ def cmd_patch(args):
         while changed:
             changed = False
             for old in ("_nolie", "_nologo", "_fastlcd", "_earlykey",
-                        "_fastpd"):
+                        "_fastpd", "_fastsettle"):
                 if base.endswith(old):
                     base = base[:-len(old)]
                     changed = True
@@ -796,13 +848,14 @@ def cmd_patch(args):
 # that padding without moving any address (the single ADR reference is
 # PC-relative to the string start).
 # Stock spelling keeps the vendor's double space and colon; any patch
-# presence collapses the space and drops the colon, then appends one
-# letter per patch, so the padded areas encode the designation:
-# N/L/F/E/P = present, - = absent.
-VER_INFO_STOCK = "T90%s V%1d.%1d.%1d"
+# presence drops the " V" separator and appends one letter per patch, so
+# the padded area encodes the designation (16-char base + up to 7
+# letters + NUL fit the 24-byte window):
+# N/L/F/E/P/S = present, - = absent.
+VER_INFO_STOCK = "T90%s%1d.%1d.%1d"
 VER_INFO_STOCK_RAW = b"T90%s  V:%1d.%1d.%1d\x00"
 VER_INFO_LETTERS = (("nolie", "N"), ("nologo", "L"), ("fastlcd", "F"),
-                   ("earlykey", "E"), ("fastpd", "P"))
+                   ("earlykey", "E"), ("fastpd", "P"), ("fastsettle", "S"))
 VER_INFO_MAX_LEN = 24  # string + NUL + the 4 free padding bytes
 VER_INFO_ADR_RD = 1  # fmt pointer is loaded into r1 (adr r1, #imm)
 
@@ -906,7 +959,7 @@ def find_ver_info(payload):
         if idx < 0:
             break
         tail = raw[idx:idx + VER_INFO_MAX_LEN + 8]
-        m = re.match(rb"T90%s {1,2}V:?%1d\.%1d\.%1d([-NLFEP]{3,5})?\x00", tail)
+        m = re.match(rb"T90%s(?: {1,2}V:?)?%1d\.%1d\.%1d([-NLFEPS]{3,8})?\x00", tail)
         if m:
             end = idx + m.end()  # just past the NUL
             # Padded dots up to the next pool word must be zeros, and the
@@ -954,15 +1007,15 @@ def _ver_info_refs(payload, string_off):
 def ver_info_letters(payload, string_off=None):
     """Read the designation letters stamped on the Ver Info string.
 
-    Returns e.g. 'NLFE' (all patched) / '----' (none) / None when the
-    string is missing or held no stamp.
+    Returns e.g. 'NLFEPS' (all patched) / '------' (none) / None when
+    the string is missing or held no stamp.
     """
     if string_off is None:
         string_off = find_ver_info(payload)
     if string_off is None:
         return None
     tail = bytes(payload[string_off:string_off + VER_INFO_MAX_LEN + 8])
-    m = re.match(rb"T90%s {1,2}V:?%1d\.%1d\.%1d([-NLFEP]{3,5})?\x00", tail)
+    m = re.match(rb"T90%s(?: {1,2}V:?)?%1d\.%1d\.%1d([-NLFEPS]{3,8})?\x00", tail)
     if not m or not m.group(1):
         return None
     return m.group(1).decode()
@@ -971,17 +1024,17 @@ def ver_info_letters(payload, string_off=None):
 def unstamp_ver_info(payload, string_off=None):
     """Restore the vendor spelling of a stamped Ver Info string.
 
-    Rewrites 'T90%s␣V…<letters>' back to 'T90%s␣␣V:…' in place and
+    Rewrites 'T90%s…<letters>' back to 'T90%s␣␣V:…' in place and
     zeroes the padding window, so the result is byte-identical to the
-    vendor string.  Accepts legacy 3-letter stamps.  Raises ValueError
-    when the string holds no stamp.
+    vendor string.  Accepts legacy stamps (with the " V" separator and
+    3-5 letters).  Raises ValueError when the string holds no stamp.
     """
     if string_off is None:
         string_off = find_ver_info(payload)
         if string_off is None:
             raise ValueError("Ver Info string pattern not found")
     tail = bytes(payload[string_off:string_off + VER_INFO_MAX_LEN + 8])
-    m = re.match(rb"T90%s {1,2}V:?%1d\.%1d\.%1d([-NLFEP]{3,5})\x00", tail)
+    m = re.match(rb"T90%s(?: {1,2}V:?)?%1d\.%1d\.%1d([-NLFEPS]{3,8})\x00", tail)
     if not m or not m.group(1):
         raise ValueError(f"Ver Info string holds no stamp: {tail[:24]!r}")
     payload[string_off:string_off + len(VER_INFO_STOCK_RAW)] = \
@@ -995,7 +1048,7 @@ def unstamp_ver_info(payload, string_off=None):
 
 
 def ver_info_expected_letters(nolie, nologo, fastlcd, earlykey="stock",
-                              fastpd="stock"):
+                              fastpd="stock", fastsettle="stock"):
     """Designation letters for a patch set ('-' = patch absent)."""
     letters = dict(VER_INFO_LETTERS)
     return "".join(
@@ -1003,7 +1056,7 @@ def ver_info_expected_letters(nolie, nologo, fastlcd, earlykey="stock",
         for patch, state in (
             ("nolie", nolie), ("nologo", nologo),
             ("fastlcd", fastlcd), ("earlykey", earlykey),
-            ("fastpd", fastpd)
+            ("fastpd", fastpd), ("fastsettle", fastsettle)
         )
     )
 
@@ -1011,8 +1064,8 @@ def ver_info_expected_letters(nolie, nologo, fastlcd, earlykey="stock",
 def stamp_ver_info(payload, string_off, letters):
     """Stamp the designation letters onto the Ver Info string in place.
 
-    Rewrites 'T90%s␣␣V:…' to 'T90%s␣V…<letters>' inside the existing
-    footprint (extends at most into the 4 free padding bytes).  The
+    Rewrites 'T90%s␣␣V:…' to 'T90%s…<letters>' inside the existing
+    footprint (extends at most into the free padding bytes).  The
     string start never moves, so the ADR reference needs no fixup.
     Returns the stamped string (without NUL).
     """
@@ -1418,12 +1471,14 @@ def find_earlykey(payload):
 
 
 # Patch names selectable via --only (comma-separated, in one flag).
-PATCH_NAMES = ("nolie", "nologo", "fastlcd", "earlykey", "fastpd")
-# Patches applied by default. earlykey is excluded: hardware testing
-# (T90B) showed no improvement in start-button response and spontaneous
-# reboots during heat-up with it applied (reboots gone without it).
-# Cause not yet isolated - earlykey stays opt-in via --only until
-# hardware-validated. Detectors still recognize already-patched images.
+PATCH_NAMES = ("nolie", "nologo", "fastlcd", "earlykey", "fastpd",
+               "fastsettle")
+# Patches applied by default. earlykey and fastsettle are excluded:
+# earlykey showed no button benefit plus spontaneous heat-up reboots on
+# T90B hardware (cause not yet isolated); fastsettle trims the charger
+# debounce guard and awaits validation on several chargers. Both stay
+# opt-in via --only until hardware-validated. Detectors still recognize
+# already-patched images.
 # fastpd IS default: it trims only dead waiting (no code redirection),
 # keeps the voltage-stability settle, and self-corrects on re-evaluation.
 DEFAULT_PATCHES = ("nolie", "nologo", "fastlcd", "fastpd")
@@ -1512,6 +1567,73 @@ def find_pd_task(payload):
     return bytes(payload).find(PD_TASK_ANCHOR) >= 0
 
 
+# CH224Q PD-settle stability thresholds: after the pre-wait, the 20 ms
+# charger task counts consecutive stable reads per charger-response bit
+# and only then requests the voltage profile. Stock needs 31 (cmp #0x1E
+# + ble, bit #0x10 path) and 41 (cmp #0x28 + ble, bit #0x08 path)
+# consecutive passes: 620/820 ms of blank screen with a dead button.
+# Same counter-increment prefix as the pre-wait, but closed by BLE
+# (stay in the settle loop) instead of BGE. Trimming both thresholds in
+# half (16/21 passes) saves ~300-400 ms; a wrong early profile request
+# self-corrects on the next heater-path re-evaluation, but this guard
+# debounces the charger link, so the patch stays opt-in until
+# hardware-validated. Present on all versions (same shape v1.1.4-v1.1.6).
+PD_SETTLE_ORIG = (0x1E, 0x28)
+PD_SETTLE_NEW = (0x0F, 0x14)
+
+
+def _pd_settle_offsets(payload, imm):
+    """Payload offsets of a settle `cmp r0, #imm` halfword.
+
+    Same fixed prefix as the pre-wait counter, but the gate closes with
+    BLE (keep settling) rather than BGE. Register/literal-pool fields
+    vary by build, so only opcode classes and fixed bytes are matched.
+    """
+    raw = bytes(payload)
+    n = len(raw)
+    hits = []
+    for off in range(0, n - 16, 2):
+        if raw[off + 1] != 0x48:  # ldr r0, [pc, #imm]
+            continue
+        if raw[off + 2] != 0x00 or raw[off + 3] != 0x88:  # ldrh r0, [r0]
+            continue
+        if raw[off + 4] != 0x40 or raw[off + 5] != 0x1C:  # adds r0, #1
+            continue
+        if raw[off + 6] != 0x80 or raw[off + 7] != 0xB2:  # uxth r0, r0
+            continue
+        if raw[off + 9] != 0x49:  # ldr r1, [pc, #imm]
+            continue
+        if raw[off + 10] != 0x08 or raw[off + 11] != 0x80:  # strh r0, [r1]
+            continue
+        if raw[off + 12] != imm or raw[off + 13] != 0x28:  # cmp r0, #imm
+            continue
+        hw = raw[off + 14] | (raw[off + 15] << 8)
+        if (hw & 0xF000) != 0xD000 or ((hw >> 8) & 0xF) != 0xD:  # ble
+            continue
+        hits.append(off + 12)
+    return hits
+
+
+def find_pd_settle(payload):
+    """Locate the two PD settle threshold compares.
+
+    Returns (state, [off_31, off_41]): "stock" (31/41 passes), "patched"
+    (16/21 passes), "absent" (no settle counter in this firmware), or
+    "unknown" (ambiguous - fail closed, do not patch).
+    """
+    old_a = _pd_settle_offsets(payload, PD_SETTLE_ORIG[0])
+    old_b = _pd_settle_offsets(payload, PD_SETTLE_ORIG[1])
+    new_a = _pd_settle_offsets(payload, PD_SETTLE_NEW[0])
+    new_b = _pd_settle_offsets(payload, PD_SETTLE_NEW[1])
+    if len(old_a) == 1 and len(old_b) == 1 and not new_a and not new_b:
+        return ("stock", [old_a[0], old_b[0]])
+    if len(new_a) == 1 and len(new_b) == 1 and not old_a and not old_b:
+        return ("patched", [new_a[0], new_b[0]])
+    if not old_a and not old_b and not new_a and not new_b:
+        return ("absent", None)
+    return ("unknown", None)
+
+
 def _parse_only(value):
     """Parse a --only value: one patch name or several comma-separated."""
     names = [p.strip() for p in value.split(",") if p.strip()]
@@ -1564,10 +1686,12 @@ Image base: 0x08005000 (Cortex-M4F)
            hardware test showed no benefit + reboots; see README)
   fastpd   shorten the PD pre-wait (100x20 ms -> 5 passes, v1.1.6 only;
            no-op on versions without the counter)
+  fastsettle halve the PD settle thresholds (31/41 -> 16/21 passes;
+           opt-in until hardware-validated; see README)
 
 every patch run also stamps the Ver Info screen (menu 16):
-  N/L/F/E/P = patch present, '-' = absent (e.g. 'T90A V1.1.4NLFEP',
-  default run stamps 'NLFP-')""",
+  N/L/F/E/P/S = patch present, '-' = absent (e.g. 'T90A1.1.4NLFEPS',
+  default run stamps 'NLF-P-')""",
     )
     parser_patch.add_argument("file", help="Input .atk firmware file")
     parser_patch.add_argument("output", nargs="?", help="Output .atk file (optional)")
@@ -1576,13 +1700,13 @@ every patch run also stamps the Ver Info screen (menu 16):
         "--only", action="append", type=_parse_only, default=None,
         metavar="PATCH[,PATCH]",
         help="Apply only the selected patches, comma-separated "
-             "(default: nolie,nologo,fastlcd,fastpd; earlykey is opt-in)",
+             "(default: nolie,nologo,fastlcd,fastpd; earlykey/fastsettle opt-in)",
     )
     selector.add_argument(
         "--skip", action="append", type=_parse_only, default=None,
         metavar="PATCH[,PATCH]",
         help="Apply the default patches except the given ones, "
-             "comma-separated (earlykey is never in the default set)",
+             "comma-separated (earlykey/fastsettle never in the default set)",
     )
 
     args = parser.parse_args()

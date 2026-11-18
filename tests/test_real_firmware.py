@@ -92,6 +92,14 @@ def test_patch_status_matches_filename(name):
     else:
         assert pd_state == "absent", f"{name}: expected no PD counter"
 
+    # fastsettle: stock thresholds everywhere so far (no archive file
+    # carries the patch yet); "_fastsettle" in a future file means patched.
+    st_state, _ = tool.find_pd_settle(payload)
+    if "_fastsettle" in name:
+        assert st_state == "patched", f"{name}: expected fastsettle patched"
+    else:
+        assert st_state == "stock", f"{name}: expected stock fastsettle"
+
     # earlykey: filenames ending in _earlykey carry the patch; the rest
     # (including fastlcd+earlykey combos) must detect through redirects.
     ek, cave_off, _, _ = tool.find_earlykey(payload)
@@ -150,6 +158,6 @@ def test_ver_info_anchor_stable(name):
         letter if f"_{patch}" in name else "-"
         for patch, letter in tool.VER_INFO_LETTERS
     )
-    # Legacy stamps (pre-fastpd tool) lack the trailing letter(s).
-    assert letters in (None, expected, expected[:3], expected[:4]), \
-        (name, letters)
+    # Legacy stamps (older tool versions) lack the trailing letter(s).
+    assert letters in (None, expected, expected[:3], expected[:4],
+                       expected[:5]), (name, letters)

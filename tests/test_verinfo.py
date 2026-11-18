@@ -164,24 +164,24 @@ def test_patch_only_nolie_stamps_N_dashes(atk_file, tmp_path, cli):
     assert tool.ver_info_letters(patched) == "N-----"
 
 
-def test_patch_skip_fastlcd_stamps_NL_dash(atk_file, tmp_path, cli):
+def test_patch_skip_fastlcd_stamps_NLEP(atk_file, tmp_path, cli):
     path = atk_file()
     code, out, err = cli("patch", "--skip", "fastlcd", path)
     assert code == 0, err
-    patched = payload_of(read(tmp_path / "t90_v1.1.6_nolie_nologo_fastpd.atk"))
-    assert tool.ver_info_letters(patched) == "NL--P-"
+    patched = payload_of(read(tmp_path / "t90_v1.1.6_nolie_nologo_earlykey_fastpd.atk"))
+    assert tool.ver_info_letters(patched) == "NL-EP-"
 
 
-def test_patch_all_stamps_NLFP(atk_file, tmp_path, cli):
+def test_patch_default_stamps_NLFEP(atk_file, tmp_path, cli):
     path = atk_file()
     code, out, err = cli("patch", path)
     assert code == 0, err
-    out_path = tmp_path / "t90_v1.1.6_nolie_nologo_fastlcd_fastpd.atk"
+    out_path = tmp_path / "t90_v1.1.6_nolie_nologo_fastlcd_earlykey_fastpd.atk"
     patched = payload_of(read(out_path))
-    assert tool.ver_info_letters(patched) == "NLF-P-"
+    assert tool.ver_info_letters(patched) == "NLFEP-"
     code, out2, _ = cli("info", str(out_path))
     assert code == 0
-    assert "verinfo:  'NLF-P-'" in out2
+    assert "verinfo:  'NLFEP-'" in out2
 
 
 def test_patch_only_earlykey_stamps_E(atk_file, tmp_path, cli):
@@ -212,13 +212,13 @@ def test_patch_all_with_earlykey_stamps_NLFEPS(atk_file, tmp_path, cli):
 def test_patch_is_idempotent_on_stamped_input(atk_file, tmp_path, cli):
     path = atk_file(payload=synthetic.build_payload(
         nolie="patched", nologo="patched", fastlcd="patched",
-        fastpd="patched"))
+        earlykey="patched", fastpd="patched"))
     before = payload_of(read(path))
-    assert tool.ver_info_letters(before) == "NLF-P-"  # builder stamps it
+    assert tool.ver_info_letters(before) == "NLFEP-"  # builder stamps it
     code, out, err = cli("patch", path)
     assert code == 0, err
     after = payload_of(
-        read(tmp_path / "t90_v1.1.6_nolie_nologo_fastlcd_fastpd.atk"))
+        read(tmp_path / "t90_v1.1.6_nolie_nologo_fastlcd_earlykey_fastpd.atk"))
     assert after == before
     assert "already stamped" in out
 

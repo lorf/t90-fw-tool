@@ -27,7 +27,7 @@ panel ever fails to initialize on cold boot.
 Menu item 16 "Ver Info" shows the model variant and firmware version.
 Any patch run also stamps a one-letter-per-patch designation onto that
 line (N=nolie, L=nologo, F=fastlcd, E=earlykey, P=fastpd, S=fastsettle,
-'-'=absent), e.g. 'T90A1.1.4NLFEPS' fully patched, 'T90A1.1.4NLF-P-'
+'-'=absent), e.g. 'T90A1.1.4NLFEPS' fully patched, 'T90A1.1.4NLFEP-'
 default; stock firmware keeps the vendor string. The stamp reuses
 padding bytes inside the existing string footprint, so no address moves.
 
@@ -56,11 +56,10 @@ The "earlykey" patch captures keypresses during boot waits: all
 delay_ms() callers are redirected to a polling-delay routine in an
 empty flash cave (ARM 0x08006040) that samples the key-scan routine
 every 8th ms with unchanged timing. So a heater start press made
-during LCD init is acted on as soon as the main loop starts.
-NOTE: hardware testing (T90B) showed no button improvement and
-spontaneous reboots during heat-up with this patch applied (gone
-without it). It is therefore EXPERIMENTAL and opt-in only
-(--only earlykey), never applied by default.
+during LCD init is acted on as soon as the main loop starts. Applied
+by default since retesting (an apparent T90B heat-up regression was
+traced to a Type-C connection issue, not the patch); use --skip earlykey
+to opt out.
 
 Firmware version extraction: the T90 firmware contains a version
 self-check function (Thumb) that loads its own version as a
@@ -549,13 +548,11 @@ def find_function_location(payload, instruction=None):
 
 
 def cmd_patch(args):
-    """Apply the selected patches (default: nolie + nologo + fastlcd + fastpd).
+    """Apply the selected patches (default: nolie + nologo + fastlcd + earlykey + fastpd).
 
-    earlykey and fastsettle are opt-in only (--only ...): earlykey is
-    experimental (hardware testing showed no button improvement and
-    spontaneous reboots during heat-up, cause not yet isolated);
-    fastsettle trims a guard that debounces the charger link and awaits
-    hardware validation. Neither is ever applied by default.
+    fastsettle is opt-in only (--only ...): it trims a guard that
+    debounces the charger link and awaits hardware validation. It is
+    never applied by default.
     """
     if args.only:
         selected = {p for group in args.only for p in group}
@@ -1565,15 +1562,15 @@ def find_earlykey(payload):
 # Patch names selectable via --only (comma-separated, in one flag).
 PATCH_NAMES = ("nolie", "nologo", "fastlcd", "earlykey", "fastpd",
                "fastsettle")
-# Patches applied by default. earlykey and fastsettle are excluded:
-# earlykey showed no button benefit plus spontaneous heat-up reboots on
-# T90B hardware (cause not yet isolated); fastsettle trims the charger
-# debounce guard and awaits validation on several chargers. Both stay
-# opt-in via --only until hardware-validated. Detectors still recognize
-# already-patched images.
+# Patches applied by default. fastsettle is excluded: it trims the
+# charger debounce guard and awaits validation on several chargers, so
+# it stays opt-in via --only until hardware-validated. Detectors still
+# recognize already-patched images.
 # fastpd IS default: it trims only dead waiting (no code redirection),
 # keeps the voltage-stability settle, and self-corrects on re-evaluation.
-DEFAULT_PATCHES = ("nolie", "nologo", "fastlcd", "fastpd")
+# earlykey IS default: retesting showed no degradation (the earlier T90B
+# heat-up reboots were a Type-C connection issue, not the patch).
+DEFAULT_PATCHES = ("nolie", "nologo", "fastlcd", "earlykey", "fastpd")
 
 
 # CH224Q PD-settle pre-wait: the 20 ms charger task counts passes before
@@ -1838,8 +1835,8 @@ Image base: 0x08005000 (Cortex-M4F)
   nolie    remove fake temperature display compensation (BNE -> NOP)
   nologo   skip the boot logo animation (draw loop runs zero times)
   fastlcd  shorten the LCD init waits (100,100,200 ms -> 70,70,120 ms)
-  earlykey capture keypresses during boot waits (EXPERIMENTAL, opt-in:
-           hardware test showed no benefit + reboots; see README)
+  earlykey capture keypresses during boot waits (on by default;
+           use --skip earlykey to opt out; see README)
   fastpd   shorten the PD pre-wait (100x20 ms -> 5 passes, v1.1.6 only;
            no-op on versions without the counter)
   fastsettle halve the PD settle thresholds (31/41 -> 16/21 passes;
@@ -1854,7 +1851,7 @@ tunable parameters (imply the patch; conflict with --skip of the same):
 
 every patch run also stamps the Ver Info screen (menu 16):
   N/L/F/E/P/S = patch present, '-' = absent (e.g. 'T90A1.1.4NLFEPS',
-  default run stamps 'NLF-P-')""",
+  default run stamps 'NLFEP-')""",
     )
     parser_patch.add_argument("file", help="Input .atk firmware file")
     parser_patch.add_argument("output", nargs="?", help="Output .atk file (optional)")
@@ -1863,13 +1860,13 @@ every patch run also stamps the Ver Info screen (menu 16):
         "--only", action="append", type=_parse_only, default=None,
         metavar="PATCH[,PATCH]",
         help="Apply only the selected patches, comma-separated "
-             "(default: nolie,nologo,fastlcd,fastpd; earlykey/fastsettle opt-in)",
+             "(default: nolie,nologo,fastlcd,earlykey,fastpd; fastsettle opt-in)",
     )
     selector.add_argument(
         "--skip", action="append", type=_parse_only, default=None,
         metavar="PATCH[,PATCH]",
         help="Apply the default patches except the given ones, "
-             "comma-separated (earlykey/fastsettle never in the default set)",
+             "comma-separated (fastsettle never in the default set)",
     )
     parser_patch.add_argument(
         "--fastsettle", type=_parse_fastsettle, default=None,

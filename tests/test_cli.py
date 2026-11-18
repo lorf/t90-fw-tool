@@ -199,7 +199,7 @@ def test_patch_all(atk_file, tmp_path, cli):
     code, out, err = cli("patch", path)
     assert code == 0, err
 
-    out_path = tmp_path / "t90_v1.1.6_nolie_nologo_fastlcd_fastpd.atk"
+    out_path = tmp_path / "t90_v1.1.6_nolie_nologo_fastlcd_earlykey_fastpd.atk"
     assert out_path.exists(), f"missing {out_path.name}; stdout:\n{out}"
     original = read(path)
     patched = read(out_path)
@@ -212,7 +212,8 @@ def test_patch_all(atk_file, tmp_path, cli):
     orig_p = payload_of(original)
     new_p = payload_of(patched)
     diffs = set(payload_diff_offsets(orig_p, new_p))
-    expected = NOLIE_BYTES | LOGO_BYTES | FASTLCD_BYTES | FASTPD_BYTES | VER_BYTES
+    expected = (NOLIE_BYTES | LOGO_BYTES | FASTLCD_BYTES | FASTPD_BYTES
+                | earlykey_diff_bytes(orig_p, new_p) | VER_BYTES)
     assert diffs == expected, (sorted(diffs), sorted(expected))
 
     # Spot-check the written instructions.
@@ -234,9 +235,10 @@ def test_patch_all(atk_file, tmp_path, cli):
     assert "nolie:    already patched" in out2
     assert "nologo:   already patched" in out2
     assert "fastlcd:  already patched" in out2
+    assert "earlykey: already patched" in out2
     assert "fastpd:   already patched" in out2
     assert "version:   1.1.6" in out2
-    assert "verinfo:  'NLF-P-'" in out2
+    assert "verinfo:  'NLFEP-'" in out2
 
     # Patched output is valid XOR of the payload (re-encrypt sanity).
     assert tool.xor_decrypt(patched[13:]) == new_p
@@ -245,7 +247,7 @@ def test_patch_all(atk_file, tmp_path, cli):
 def test_patch_keeps_file_size_and_header(atk_file, tmp_path, cli):
     path = atk_file()
     code, out, _ = cli("patch", path)
-    out_path = tmp_path / "t90_v1.1.6_nolie_nologo_fastlcd_fastpd.atk"
+    out_path = tmp_path / "t90_v1.1.6_nolie_nologo_fastlcd_earlykey_fastpd.atk"
     assert read(out_path)[:13] == read(path)[:13]
     assert len(read(out_path)) == len(read(path))
 
@@ -290,11 +292,14 @@ def test_patch_skip_fastlcd(atk_file, tmp_path, cli):
     path = atk_file()
     code, out, err = cli("patch", "--skip", "fastlcd", path)
     assert code == 0, err
-    out_path = tmp_path / "t90_v1.1.6_nolie_nologo_fastpd.atk"
+    out_path = tmp_path / "t90_v1.1.6_nolie_nologo_earlykey_fastpd.atk"
     assert out_path.exists()
     diffs = set(payload_diff_offsets(payload_of(read(path)),
                                      payload_of(read(out_path))))
-    assert diffs == NOLIE_BYTES | LOGO_BYTES | FASTPD_BYTES | VER_BYTES
+    assert diffs == (NOLIE_BYTES | LOGO_BYTES | FASTPD_BYTES
+                     | earlykey_diff_bytes(payload_of(read(path)),
+                                           payload_of(read(out_path)))
+                     | VER_BYTES)
 
 
 def test_patch_only_fastpd(atk_file, tmp_path, cli):
@@ -562,30 +567,32 @@ def test_patch_only_earlykey(atk_file, tmp_path, cli):
     assert "fastlcd:  not patched" in info
 
 
-def test_default_patch_does_not_apply_earlykey(atk_file, tmp_path, cli):
+def test_default_patch_applies_earlykey(atk_file, tmp_path, cli):
     path = atk_file()
     code, out, err = cli("patch", path)
     assert code == 0, err
+    out_path = tmp_path / "t90_v1.1.6_nolie_nologo_fastlcd_earlykey_fastpd.atk"
+    assert out_path.exists()  # _earlykey in the name
+    new_p = payload_of(read(out_path))
+    assert new_p[synthetic.CAVE_OFF:synthetic.CAVE_OFF + synthetic.CAVE_LEN] != bytes(
+        synthetic.CAVE_LEN
+    )
+    code, info, _ = cli("info", str(out_path))
+    assert "earlykey: already patched" in info
+
+
+def test_skip_earlykey_opts_out(atk_file, tmp_path, cli):
+    path = atk_file()
+    code, out, err = cli("patch", "--skip", "earlykey", path)
+    assert code == 0, err
     out_path = tmp_path / "t90_v1.1.6_nolie_nologo_fastlcd_fastpd.atk"
-    assert out_path.exists()  # no _earlykey in the name
+    assert out_path.exists()
     new_p = payload_of(read(out_path))
     assert new_p[synthetic.CAVE_OFF:synthetic.CAVE_OFF + synthetic.CAVE_LEN] == bytes(
         synthetic.CAVE_LEN
     )
     code, info, _ = cli("info", str(out_path))
     assert "earlykey: not patched" in info
-
-
-def test_skip_fastlcd_does_not_apply_earlykey(atk_file, tmp_path, cli):
-    path = atk_file()
-    code, out, err = cli("patch", "--skip", "fastlcd", path)
-    assert code == 0, err
-    out_path = tmp_path / "t90_v1.1.6_nolie_nologo_fastpd.atk"
-    assert out_path.exists()
-    new_p = payload_of(read(out_path))
-    assert new_p[synthetic.CAVE_OFF:synthetic.CAVE_OFF + synthetic.CAVE_LEN] == bytes(
-        synthetic.CAVE_LEN
-    )
 
 
 def test_patch_earlykey_with_fastlcd(atk_file, tmp_path, cli):
@@ -655,7 +662,7 @@ def test_patch_earlykey_occupied_cave_errors(atk_file, cli):
 def test_patch_skip_all_errors(atk_file, cli):
     path = atk_file()
     code, _, err = cli(
-        "patch", "--skip", "nolie,nologo,fastlcd,fastpd", path
+        "patch", "--skip", "nolie,nologo,fastlcd,earlykey,fastpd", path
     )
     assert code == 1
     assert "no patches selected" in err
@@ -679,12 +686,12 @@ def test_only_and_skip_mutually_exclusive(atk_file, cli):
 def test_patch_patched_input_is_idempotent(atk_file, tmp_path, cli):
     path = atk_file(payload=synthetic.build_payload(
         nolie="patched", nologo="patched", fastlcd="patched",
-        fastpd="patched",
+        earlykey="patched", fastpd="patched",
     ))
     before = read(path)
     code, out, err = cli("patch", path)
     assert code == 0, err
-    out_path = tmp_path / "t90_v1.1.6_nolie_nologo_fastlcd_fastpd.atk"
+    out_path = tmp_path / "t90_v1.1.6_nolie_nologo_fastlcd_earlykey_fastpd.atk"
     assert out_path.exists()
     after = read(out_path)
     assert after[13:] == before[13:]  # payload unchanged
@@ -695,14 +702,14 @@ def test_patch_patched_input_no_suffix_stacking(atk_file, tmp_path, cli):
     # Re-running on an output-named file must not grow the name.
     path = atk_file(payload=synthetic.build_payload(
         nolie="patched", nologo="patched", fastlcd="patched",
-        fastpd="patched",
-    ), name="t90_v1.1.6_nolie_nologo_fastlcd_fastpd.atk")
+        earlykey="patched", fastpd="patched",
+    ), name="t90_v1.1.6_nolie_nologo_fastlcd_earlykey_fastpd.atk")
     code, out, _ = cli("patch", path)
     assert code == 0
-    assert (tmp_path / "t90_v1.1.6_nolie_nologo_fastlcd_fastpd.atk").exists()
+    assert (tmp_path / "t90_v1.1.6_nolie_nologo_fastlcd_earlykey_fastpd.atk").exists()
     # No doubled suffix file was written.
     assert not (
-        tmp_path / "t90_v1.1.6_nolie_nologo_fastlcd_fastpd_nolie_nologo_fastlcd_fastpd.atk"
+        tmp_path / "t90_v1.1.6_nolie_nologo_fastlcd_earlykey_fastpd_nolie_nologo_fastlcd_earlykey_fastpd.atk"
     ).exists()
 
 
@@ -713,14 +720,17 @@ def test_patch_partial_input_keeps_existing_patch_in_name(
     # remaining patches plus the stamp for the full effective set.
     path = atk_file(payload=synthetic.build_payload(nolie="patched",
                                                     verinfo="stock"))
-    code, out, err = cli("patch", path)  # applies nologo + fastlcd
+    code, out, err = cli("patch", path)  # applies nologo + fastlcd + earlykey + fastpd
     assert code == 0, err
-    out_path = tmp_path / "t90_v1.1.6_nolie_nologo_fastlcd_fastpd.atk"
+    out_path = tmp_path / "t90_v1.1.6_nolie_nologo_fastlcd_earlykey_fastpd.atk"
     assert out_path.exists(), out
-    # Only nologo + fastlcd + fastpd bytes changed vs the input.
+    # Only nologo + fastlcd + earlykey + fastpd bytes changed vs the input.
     diffs = set(payload_diff_offsets(payload_of(read(path)),
                                      payload_of(read(out_path))))
-    assert diffs == LOGO_BYTES | FASTLCD_BYTES | FASTPD_BYTES | VER_BYTES
+    assert diffs == (LOGO_BYTES | FASTLCD_BYTES | FASTPD_BYTES
+                     | earlykey_diff_bytes(payload_of(read(path)),
+                                           payload_of(read(out_path)))
+                     | VER_BYTES)
 
 
 def test_patch_explicit_output(atk_file, tmp_path, cli):
@@ -803,9 +813,9 @@ def test_patch_names_constant():
 
 
 def test_default_patches_exclude_earlykey():
-    # earlykey/fastsettle are opt-in: never in the default set.
-    assert tool.DEFAULT_PATCHES == ("nolie", "nologo", "fastlcd", "fastpd")
-    assert "earlykey" not in tool.DEFAULT_PATCHES
+    # fastsettle is opt-in: never in the default set.
+    assert tool.DEFAULT_PATCHES == ("nolie", "nologo", "fastlcd", "earlykey",
+                                    "fastpd")
     assert "fastsettle" not in tool.DEFAULT_PATCHES
 
 
